@@ -35,10 +35,12 @@ pcall(function()
     if targetParent:FindFirstChild("SzpontActiveCheats") then targetParent.SzpontActiveCheats:Destroy() end
     if targetParent:FindFirstChild("SzpontKeySystem") then targetParent.SzpontKeySystem:Destroy() end
     if targetParent:FindFirstChild("SzpontGameSelect") then targetParent.SzpontGameSelect:Destroy() end
+    if targetParent:FindFirstChild("SzpontSkinChanger") then targetParent.SzpontSkinChanger:Destroy() end
     if game.CoreGui:FindFirstChild("SzpontHack") then game.CoreGui.SzpontHack:Destroy() end
     if game.CoreGui:FindFirstChild("SzpontActiveCheats") then game.CoreGui.SzpontActiveCheats:Destroy() end
     if game.CoreGui:FindFirstChild("SzpontKeySystem") then game.CoreGui.SzpontKeySystem:Destroy() end
     if game.CoreGui:FindFirstChild("SzpontGameSelect") then game.CoreGui.SzpontGameSelect:Destroy() end
+    if game.CoreGui:FindFirstChild("SzpontSkinChanger") then game.CoreGui.SzpontSkinChanger:Destroy() end
 end)
 
 ------------------------------------------------------------
@@ -1144,8 +1146,9 @@ function startMainScript()
                     if result and result.Instance then
                         local hitChar = result.Instance:FindFirstAncestorOfClass("Model")
                         if hitChar then
+                            local hitHum = hitChar:FindFirstChildOfClass("Humanoid")
                             local targetPlayer = game.Players:GetPlayerFromCharacter(hitChar)
-                            if targetPlayer and targetPlayer ~= plr and getRole(targetPlayer) == "Murderer" then
+                            if targetPlayer and targetPlayer ~= plr and getRole(targetPlayer) == "Murderer" and hitHum and hitHum.Health > 0 then
                                 tool:Activate()
                             end
                         end
@@ -1336,8 +1339,9 @@ function startBloxStrikeScript()
     local aimbotFov = 50
     local aimbotSpeed = 6
     local flySpeed = 60
+    local rapidfire = false
+    local rapidMult = 3
 
-    local lastTriggerTime = 0
     local fovCircle = nil
     local ppm = false
 
@@ -1380,68 +1384,69 @@ function startBloxStrikeScript()
         return false
     end
 
+    -- Źródło prawdy: atrybut gracza "Team" = "Terrorists" / "Counter-Terrorists"
+    -- (gra NIE trzyma postaci w folderach teamów — Characters/Terrorists jest puste,
+    --  postacie są bezpośrednio w workspace.Characters)
+    local function getTeamOf(player)
+        if not player then return nil end
+
+        local ok, attr = pcall(function() return player:GetAttribute("Team") end)
+        if ok and type(attr) == "string" and attr ~= "" then
+            return attr
+        end
+
+        -- Fallback: folder teamu (gdyby gra kiedyś zmieniła strukturę)
+        if Characters then
+            local t = Characters:FindFirstChild("Terrorists")
+            local ct = Characters:FindFirstChild("Counter-Terrorists")
+            if t and isInTeamFolder(player, t) then return "Terrorists" end
+            if ct and isInTeamFolder(player, ct) then return "Counter-Terrorists" end
+        end
+        return nil
+    end
+
     -- Cache teamu gracza (odświeża się co 0.5s żeby nie obciążać)
+    -- Zapamiętujemy ostatnio znaną wartość, bo gra USUWA atrybut "Team" po śmierci
     local myTeamCache = nil
+    local lastKnownMyTeam = nil
     local lastTeamCheck = 0
 
     local function getMyTeam()
         local now = tick()
-        if myTeamCache and (now - lastTeamCheck) < 0.5 then
+        if lastTeamCheck > 0 and (now - lastTeamCheck) < 0.5 then
             return myTeamCache
         end
         lastTeamCheck = now
-
-        if not Characters then return nil end
-
-        local t = Characters:FindFirstChild("Terrorists")
-        local ct = Characters:FindFirstChild("Counter-Terrorists")
-
-        if t and isInTeamFolder(plr, t) then
-            myTeamCache = "T"
-            return "T"
+        myTeamCache = getTeamOf(plr)
+        if myTeamCache then
+            lastKnownMyTeam = myTeamCache
+        else
+            myTeamCache = lastKnownMyTeam
         end
-        if ct and isInTeamFolder(plr, ct) then
-            myTeamCache = "CT"
-            return "CT"
-        end
-
-        myTeamCache = nil
-        return nil
+        return myTeamCache
     end
 
     local function isTeammate(player)
         if player == plr then return false end
-        if not Characters then return false end
-
         local myTeam = getMyTeam()
         if not myTeam then return false end
-
-        local t = Characters:FindFirstChild("Terrorists")
-        local ct = Characters:FindFirstChild("Counter-Terrorists")
-
-        if myTeam == "T" and t and isInTeamFolder(player, t) then return true end
-        if myTeam == "CT" and ct and isInTeamFolder(player, ct) then return true end
-        return false
+        return getTeamOf(player) == myTeam
     end
 
     local function isEnemy(player)
         if player == plr then return false end
-        if not Characters then return true end
+        -- Brak znanego teamu u nas lub u celu → bezpieczniejsze domyślnie: wróg
+        return not isTeammate(player)
+    end
 
-        local myTeam = getMyTeam()
-        if not myTeam then return true end
-
-        local t = Characters:FindFirstChild("Terrorists")
-        local ct = Characters:FindFirstChild("Counter-Terrorists")
-
-        -- Jeśli gracz jest w T a my w CT → wróg
-        if myTeam == "CT" and t and isInTeamFolder(player, t) then return true end
-        -- Jeśli gracz jest w CT a my w T → wróg
-        if myTeam == "T" and ct and isInTeamFolder(player, ct) then return true end
-        -- Jeśli gracz jest w tym samym teamie → nie wróg
-        if myTeam == "T" and t and isInTeamFolder(player, t) then return false end
-        if myTeam == "CT" and ct and isInTeamFolder(player, ct) then return false end
-        -- Nie znaleziono w żadnym teamie → traktuj jako wroga
+    -- BloxStrike nie używa Humanoida — życie to atrybuty Health/Dead (postaci i gracza)
+    local function isAliveTarget(player, char)
+        if player:GetAttribute("Dead") == true then return false end
+        if char:GetAttribute("Dead") == true then return false end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then return hum.Health > 0 end
+        local hp = tonumber(char:GetAttribute("Health"))
+        if hp ~= nil then return hp > 0 end
         return true
     end
 
@@ -1515,7 +1520,7 @@ function startBloxStrikeScript()
     scrollFrame.Position = UDim2.new(0.05, 0, 0.10, 0)
     scrollFrame.BackgroundTransparency = 1
     scrollFrame.BorderSizePixel = 0
-    scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 750)
+    scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 830)
     scrollFrame.ScrollBarThickness = 4
     scrollFrame.ScrollBarImageColor3 = themes[currentTheme].Primary
     scrollFrame.ZIndex = 2
@@ -1615,6 +1620,11 @@ function startBloxStrikeScript()
 
     local bThemeToggle = createButton("Theme: Orange", 19)
 
+    local bRapid = createButton("Rapidfire: OFF", 20)
+    local slRapid = createSliderLabel("Rapidfire Speed: 3x", 21)
+    local sbRapid, sfRapid = createSliderBar(22)
+    sfRapid.Size = UDim2.new((rapidMult - 1) / 9, 0, 1, 0)
+
     -- PANEL PO PRAWEJ: 🔥 SzpontLista 🔥
     local activeCheatsGui = Instance.new("ScreenGui")
     activeCheatsGui.Name = "SzpontActiveCheats"
@@ -1667,7 +1677,8 @@ function startBloxStrikeScript()
         local activeList = {}
         if aimbotEnabled then table.insert(activeList, "• Aimbot PPM (FOV " .. aimbotFov .. ")") end
         if espEnabled then table.insert(activeList, "• ESP") end
-        if triggerbot then table.insert(activeList, "• Triggerbot (0.07s)") end
+        if triggerbot then table.insert(activeList, "• Triggerbot") end
+        if rapidfire then table.insert(activeList, "• Rapidfire (" .. rapidMult .. "x)") end
         if flyEnabled then table.insert(activeList, "• Fly (" .. flySpeed .. ")") end
         if noclip then table.insert(activeList, "• Noclip") end
         if bunnyHop then table.insert(activeList, "• Bunny Hop") end
@@ -1781,6 +1792,7 @@ function startBloxStrikeScript()
         themeListFrame.Visible = not themeListFrame.Visible
     end)
 
+
     -- Przyciski włączające/wyłączające hacki
     b1.MouseButton1Click:Connect(function()
         aimbotEnabled = not aimbotEnabled
@@ -1800,6 +1812,13 @@ function startBloxStrikeScript()
         triggerbot = not triggerbot
         b3.Text = triggerbot and "Triggerbot: ON" or "Triggerbot: OFF"
         b3.BackgroundColor3 = triggerbot and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
+        updateActiveCheatsList()
+    end)
+
+    bRapid.MouseButton1Click:Connect(function()
+        rapidfire = not rapidfire
+        bRapid.Text = rapidfire and "Rapidfire: ON" or "Rapidfire: OFF"
+        bRapid.BackgroundColor3 = rapidfire and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
         updateActiveCheatsList()
     end)
 
@@ -2006,16 +2025,17 @@ function startBloxStrikeScript()
     end)
 
     -- Slidery
-    local dragging1, dragging2, dragging3, dragging4 = false, false, false, false
+    local dragging1, dragging2, dragging3, dragging4, dragging5 = false, false, false, false, false
 
     sb1.MouseButton1Down:Connect(function() dragging1 = true end)
     sb2.MouseButton1Down:Connect(function() dragging2 = true end)
     sb4.MouseButton1Down:Connect(function() dragging3 = true end)
     sb5.MouseButton1Down:Connect(function() dragging4 = true end)
+    sbRapid.MouseButton1Down:Connect(function() dragging5 = true end)
 
     uis.InputEnded:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging1, dragging2, dragging3, dragging4 = false, false, false, false
+            dragging1, dragging2, dragging3, dragging4, dragging5 = false, false, false, false, false
         end
     end)
 
@@ -2045,6 +2065,12 @@ function startBloxStrikeScript()
                 hitboxSize = math.floor(1 + rel * 49)
                 sl5.Text = "Hitbox Size: " .. hitboxSize
                 updateActiveCheatsList()
+            elseif dragging5 then
+                local rel = math.clamp((i.Position.X - sbRapid.AbsolutePosition.X) / sbRapid.AbsoluteSize.X, 0, 1)
+                sfRapid.Size = UDim2.new(rel, 0, 1, 0)
+                rapidMult = math.floor(1 + rel * 9)
+                slRapid.Text = "Rapidfire Speed: " .. rapidMult .. "x"
+                updateActiveCheatsList()
             end
         end
     end)
@@ -2053,8 +2079,9 @@ function startBloxStrikeScript()
     uis.InputBegan:Connect(function(i, gp)
         if gp then return end
         if i.KeyCode == Enum.KeyCode.P then
-            mainFrame.Visible = not mainFrame.Visible
-            cheatsPanel.Visible = mainFrame.Visible
+            local show = not mainFrame.Visible
+            mainFrame.Visible = show
+            cheatsPanel.Visible = show
         end
     end)
 
@@ -2163,8 +2190,7 @@ function startBloxStrikeScript()
 
             for _, p in pairs(game.Players:GetPlayers()) do
                 if p ~= plr and p.Character and isEnemy(p) then
-                    local hum = p.Character:FindFirstChildOfClass("Humanoid")
-                    if hum and hum.Health > 0 then
+                    if isAliveTarget(p, p.Character) then
                         -- Szukaj najlepszego punktu: Head > UpperTorso > HumanoidRootPart
                         local parts = {"Head", "UpperTorso", "HumanoidRootPart"}
                         for _, partName in ipairs(parts) do
@@ -2187,44 +2213,129 @@ function startBloxStrikeScript()
             end
 
             if best then
-                local goal = CFrame.new(camPos, best)
-                local alpha = math.clamp(aimbotSpeed / 30, 0.05, 1)
-                cam.CFrame = cam.CFrame:Lerp(goal, alpha)
+                -- Symulacja ruchu myszy: kontroler gry sam obraca kamerę I postać,
+                -- strzały trafiają w cel, a widok nie wraca po puszczeniu PPM.
+                local dir = (best - camPos).Unit
+                local look = cam.CFrame.LookVector
+                local ang = math.acos(math.clamp(look:Dot(dir), -1, 1))
+                if ang > math.rad(0.3) and mousemoverel and iswindowactive() then
+                    local yawErr, pitchErr = 0, 0
+                    local flatLook = Vector3.new(look.X, 0, look.Z)
+                    local flatDir = Vector3.new(dir.X, 0, dir.Z)
+                    if flatLook.Magnitude > 1e-4 and flatDir.Magnitude > 1e-4 then
+                        flatLook = flatLook.Unit
+                        flatDir = flatDir.Unit
+                        yawErr = math.atan2(flatDir:Cross(flatLook).Y, flatLook:Dot(flatDir))
+                    end
+                    pitchErr = math.asin(math.clamp(dir.Y, -1, 1)) - math.asin(math.clamp(look.Y, -1, 1))
+                    local gain = math.clamp(aimbotSpeed * 50, 100, 600)
+                    local dx = math.clamp(math.floor(yawErr * gain + 0.5), -500, 500)
+                    local dy = math.clamp(math.floor(-pitchErr * gain + 0.5), -500, 500)
+                    if dx ~= 0 or dy ~= 0 then
+                        pcall(mousemoverel, dx, dy)
+                    end
+                elseif not mousemoverel then
+                    -- fallback gdy brak mousemoverel: obrót samej kamery
+                    local goal = CFrame.new(camPos, best)
+                    local alpha = math.clamp(aimbotSpeed / 30, 0.05, 1)
+                    cam.CFrame = cam.CFrame:Lerp(goal, alpha)
+                end
             end
         end
     end)
 
-    -- Triggerbot (strzela co 0.07s gdy celownik na wrogu)
-    runService.RenderStepped:Connect(function()
-        if triggerbot and plr.Character then
-            local now = tick()
-            if (now - lastTriggerTime) >= 0.07 then
-                local ray = cam:ViewportPointToRay(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
-                local params = RaycastParams.new()
-                params.FilterDescendantsInstances = {plr.Character}
-                params.FilterType = Enum.RaycastFilterType.Exclude
-                local result = workspace:Raycast(ray.Origin, ray.Direction * 1000, params)
-                if result and result.Instance then
-                    local hitChar = result.Instance:FindFirstAncestorOfClass("Model")
-                    if hitChar then
-                        local target = game.Players:GetPlayerFromCharacter(hitChar)
-                        if target and target ~= plr and isEnemy(target) then
-                            lastTriggerTime = now
-                            -- Metoda 1: tool:Activate()
-                            local tool = plr.Character:FindFirstChildOfClass("Tool")
-                            if tool then
-                                pcall(function() tool:Activate() end)
-                            end
-                            -- Metoda 2: VirtualUser (fallback)
-                            pcall(function()
-                                vu:CaptureController()
-                                vu:ClickButton1(Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2))
-                            end)
-                        end
-                    end
+    -- Cel pod krzyżem: żywy wróg na linii wzroku
+    local function crosshairEnemy()
+        local ray = cam:ViewportPointToRay(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+        local params = RaycastParams.new()
+        params.FilterDescendantsInstances = {plr.Character}
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        local result = workspace:Raycast(ray.Origin, ray.Direction * 1000, params)
+        if result and result.Instance then
+            local hitChar = result.Instance:FindFirstAncestorOfClass("Model")
+            if hitChar then
+                local target = game.Players:GetPlayerFromCharacter(hitChar)
+                if target and target ~= plr and isEnemy(target) and isAliveTarget(target, hitChar) then
+                    return true
                 end
             end
         end
+        return false
+    end
+
+    -- Triggerbot (strzela natychmiast gdy celownik na żywym wrogu)
+    runService.RenderStepped:Connect(function()
+        if triggerbot and plr.Character and crosshairEnemy() then
+            local tool = plr.Character:FindFirstChildOfClass("Tool")
+            if tool then
+                pcall(function() tool:Activate() end)
+            end
+            pcall(function()
+                vu:CaptureController()
+                vu:ClickButton1(Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2))
+            end)
+        end
+    end)
+
+    -- Rapidfire: skraca delay IsShooting/ShootDelayThread do FireRate/rapidMult.
+    -- NIE dotyka Properties.FireRate (anty-cheat gry: zapis = wiszenie wątku).
+    -- Serwer wyrzuca broń z eq przy zbyt szybkich strzałach (próg między 3x a 4x):
+    -- - twarda podłoga 0.03s między strzałami,
+    -- - auto-redukcja mnożnika, gdy serwer wyrzuci broń tuż po strzalach.
+    local invCtl = nil
+    local rfLastShotTick, rfGuardTick = 0, 0
+    local function getEquipped()
+        if not invCtl then
+            local ok, m = pcall(require, game:GetService("ReplicatedStorage").Controllers.InventoryController)
+            if ok then invCtl = m end
+        end
+        if not invCtl then return nil end
+        local ok, w = pcall(invCtl.getCurrentEquipped)
+        if ok then return w end
+        return nil
+    end
+
+    local function rfDiag(msg)
+        local store = invCtl
+        if not store then store = (type(getgenv) == "function" and getgenv()) or _G end
+        store._rfDiag = store._rfDiag or {}
+        table.insert(store._rfDiag, msg)
+        while #store._rfDiag > 30 do table.remove(store._rfDiag, 1) end
+    end
+
+    runService.Heartbeat:Connect(function()
+        if not rapidfire or not plr.Character then return end
+        local w = getEquipped()
+        if not w or not w.IsShooting or w.IsReloading or w.IsAdjustingSuppressor then return end
+        local props = w.Properties
+        if not props or props.Class ~= "Weapon" or not props.FireRate then return end
+        local minDelay = math.max(0.03, props.FireRate / rapidMult)
+        if tick() - (w.ShootRequestTick or 0) < minDelay then return end
+        if not (w.IsFireHeld or (triggerbot and crosshairEnemy())) then return end
+        if w.ShootDelayThread then
+            pcall(task.cancel, w.ShootDelayThread)
+            w.ShootDelayThread = nil
+        end
+        w.IsShooting = false
+        local okS, errS = pcall(function() w:shoot() end)
+        rfLastShotTick = tick()
+        rfDiag(okS and ("SHOT m" .. tostring(rapidMult) .. " r" .. tostring(w.Rounds)) or ("ERR " .. tostring(errS):sub(1, 120)))
+    end)
+
+    -- Ochrona przed wyrzucaniem: serwer usunął broń tuż po strzalach rapidfire => redukcja mnożnika
+    pcall(function()
+        local Rem = require(game:GetService("ReplicatedStorage").Database.Security.Remotes)
+        Rem.Inventory.RemoveInventoryItem.Listen(function()
+            local now = tick()
+            if rapidfire and (now - rfLastShotTick) < 2 and (now - rfGuardTick) > 1.5 and rapidMult > 1 then
+                rfGuardTick = now
+                rapidMult = rapidMult - 1
+                slRapid.Text = "Rapidfire Speed: " .. rapidMult .. "x"
+                sfRapid.Size = UDim2.new((rapidMult - 1) / 9, 0, 1, 0)
+                updateActiveCheatsList()
+                rfDiag("AUTO-DOWN m" .. tostring(rapidMult))
+            end
+        end)
     end)
 
     -- Fly (BodyVelocity + BodyGyro — nie nadpisuje kontrolera gry)
@@ -2279,36 +2390,56 @@ function startBloxStrikeScript()
         end
     end)
 
-    -- Bunny Hop — auto-skok po lądowaniu gdy trzymasz Space
+    -- Bunny Hop v3 — auto-skok po lądowaniu gdy trzymasz Space
+    -- BloxStrike: Jump() gry odrzuca skok w stanie Freefall/Jumping i blokuje
+    -- re-jump <0.15s po lądowaniu. Więc gramy TYLKO z podłoża (Running/Landed),
+    -- bez wymuszania ChangeState(Jumping) (to łamało maszynę stanów gry).
     local bhopLastJump = 0
     local CharacterController = nil
     pcall(function()
         CharacterController = require(game.ReplicatedStorage.Controllers.CharacterController)
     end)
 
+    local function isGroundedBhop(state)
+        return state == Enum.HumanoidStateType.Running
+            or state == Enum.HumanoidStateType.RunningNoPhysics
+            or state == Enum.HumanoidStateType.Landed
+    end
+
     runService.Heartbeat:Connect(function()
-        if bunnyHop and uis:IsKeyDown(Enum.KeyCode.Space) and plr.Character then
-            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
-            if hum and hum.Health > 0 then
-                local state = hum:GetState()
-                local now = tick()
-                -- Minimalny odstęp 0.05s żeby silnik zdążył przetworzyć skok
-                if now - bhopLastJump >= 0.05 then
-                    if state == Enum.HumanoidStateType.Running
-                        or state == Enum.HumanoidStateType.Landed
-                        or state == Enum.HumanoidStateType.RunningNoPhysics
-                        or state == Enum.HumanoidStateType.Freefall then
-                        bhopLastJump = now
-                        -- Metoda 1: CharacterController.jump() — system skoków gry
-                        if CharacterController then
-                            pcall(function() CharacterController.jump() end)
-                        end
-                        -- Metoda 2: hum.Jump + ChangeState — podwójna szansa
-                        hum.Jump = true
-                        hum:ChangeState(Enum.HumanoidStateType.Jumping)
-                    end
-                end
+        if not (bunnyHop and uis:IsKeyDown(Enum.KeyCode.Space) and plr.Character) then
+            return
+        end
+        local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+        if not (hum and hum.Health > 0) then
+            return
+        end
+        local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
+        if not hrp then
+            return
+        end
+        local now = tick()
+        local state = hum:GetState()
+
+        -- Awaryjna kontrola: skok został wydany, ale postać nie odbiła się
+        -- od ziemi (velocity.Y <= 1) -> twardy impuls fizyczny, działa zawsze.
+        if isGroundedBhop(state) and now - bhopLastJump < 0.2 then
+            local vel = hrp.AssemblyLinearVelocity
+            if vel.Y <= 1 then
+                hrp.AssemblyLinearVelocity = Vector3.new(vel.X, 22, vel.Z)
+                bhopLastJump = now
             end
+        end
+
+        -- Skok tylko z podłoża, co 0.12s (silnik gry ma blokadę <0.15s)
+        if isGroundedBhop(state) and now - bhopLastJump >= 0.12 then
+            bhopLastJump = now
+            -- Metoda 1: natywny system gry (IsJumpRequested + Jump -> JumpPower 19.5)
+            if CharacterController then
+                pcall(function() CharacterController.jump() end)
+            end
+            -- Metoda 2: bezpośredni impuls Humanoida (gwarancja odbicia)
+            hum.Jump = true
         end
     end)
 
@@ -2350,15 +2481,17 @@ function startBloxStrikeScript()
         end
     end)
 
-    -- ESP (Highlight + tabliczka: TYLKO wrogowie na czerwono, team ignorowany)
+    -- ESP (Highlight + tabliczka: wrogowie na czerwono, team na zielono)
     runService.RenderStepped:Connect(function()
         for _, player in pairs(game.Players:GetPlayers()) do
             if player ~= plr and player.Character then
                 local char = player.Character
                 local head = char:FindFirstChild("Head")
-                if espEnabled and head and isEnemy(player) then
+                local enemy = isEnemy(player)
+                local teammate = isTeammate(player)
+                if espEnabled and head and (enemy or teammate) then
                     local hum = char:FindFirstChildOfClass("Humanoid")
-                    local espColor = Color3.fromRGB(255, 40, 40)
+                    local espColor = teammate and Color3.fromRGB(40, 255, 80) or Color3.fromRGB(255, 40, 40)
 
                     local highlight = char:FindFirstChild("BSHighlight") or Instance.new("Highlight", char)
                     highlight.Name = "BSHighlight"
@@ -2382,7 +2515,7 @@ function startBloxStrikeScript()
                     txt.TextStrokeTransparency = 0
                     txt.TextSize = 13
                     txt.Font = Enum.Font.SourceSansBold
-                    local hp = hum and math.floor(hum.Health) or 0
+                    local hp = math.floor((hum and hum.Health) or tonumber(char:GetAttribute("Health")) or 0)
                     local dist = math.floor((head.Position - cam.CFrame.Position).Magnitude)
                     txt.Text = player.Name .. "\nHP: " .. hp .. " | " .. dist .. "m"
                 else
