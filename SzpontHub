@@ -2364,6 +2364,8 @@ function startBloxStrikeScript()
         if espEnabled then table.insert(activeList, "• ESP") end
         if triggerbot then table.insert(activeList, "• Triggerbot (" .. triggerDelayMs .. " ms)") end
         if _G.__liptonSilentAim then table.insert(activeList, "• Silent Aim") end
+        if _G.__liptonWallbang then table.insert(activeList, "• Wallbang") end
+        if _G.__liptonTPShot then table.insert(activeList, "• TP Shot") end
         if noRecoil then table.insert(activeList, "• No Recoil") end
         if noSpread then table.insert(activeList, "• No Spread") end
         if hitboxExpander then table.insert(activeList, "• Hitbox (" .. hitboxSize .. ")") end
@@ -3088,6 +3090,41 @@ function startBloxStrikeScript()
         updateActiveCheatsList()
     end)
 
+    -- WALLBANG (modyfikator Silent Aim): cel zza KAZDEJ zaslony tez dopuszczony,
+    -- a budzet penetracji wymuszony na1e9 — w v_u_40 gry warunek stopu to
+    -- `nagromadzona grubosc > próg_materialu + budzet`, wiec1e9 nigdy nie
+    -- zostanie przekroczony i petla castThrough przechodzi przez sciane
+    -- niezaleznie od grubosci/materialeu. Dane GEOMETRII zostaja prawdziwe
+    -- (pozycje/instancje/normalne z raycastow gry, pary entry/exit liczone
+    -- przez rewersyjny raycast jak w vanilla) — zmienia sie tylko zasieg
+    -- przejscia i dystans tracerow (do celu, nie do sciany). Gra ma natywny
+    -- wallbang (AK: Penetration0.5, WallbangMultiplier0.75 =75% dmg przez
+    -- sciane); nasz wariant dac powinien tez grube sciany — ostateczna
+    -- weryfikacja: serwer moze ponownie liczyc budzet (test zywy).
+    local bWB = createButton("Wallbang: OFF", 11, "RageBot")
+    bWB.MouseButton1Click:Connect(function()
+        local on = not G.__liptonWallbang
+        G.__liptonWallbang = on
+        bWB.Text = on and "Wallbang: ON" or "Wallbang: OFF"
+        bWB.BackgroundColor3 = on and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
+        updateActiveCheatsList()
+    end)
+
+    -- TP SHOT — wymaga Silent Aim + Wallbang (bez Wallbang cel zza zasłony
+    -- nigdy nie jest wybierany, więc blink nie występuje). Dla celu zza
+    -- zasłony: blink obok ofiary → strzał w głowę z bliska (pełny dmg,
+    -- zawsze head — bez wallbangowego mnożnika0.75) → powrót. Okno ~0.1 s
+    -- — niewidoczność dla innych NIE jest gwarantowana (replikacja
+    -- ~20-60 Hz), serwer może tez zkickać za skok pozycji — testuj.
+    local bTP = createButton("TP Shot: OFF", 12, "RageBot")
+    bTP.MouseButton1Click:Connect(function()
+        local on = not G.__liptonTPShot
+        G.__liptonTPShot = on
+        bTP.Text = on and "TP Shot: ON" or "TP Shot: OFF"
+        bTP.BackgroundColor3 = on and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
+        updateActiveCheatsList()
+    end)
+
     -- Czesc wystaje, gdy ray z pocisku trafia w NIĄ jako pierwsza
     -- (gra pomija akcesoria i kapsuly, wiec czapka nie zablokuje celu w glowe)
     -- NIEZALEŻNA weryfikacja ściany: vanilla workspace:Raycast (niezależna od
@@ -3188,6 +3225,23 @@ function startBloxStrikeScript()
             end
         end
         sortT(enemies, function(a, b) return a[2] < b[2] end)
+        -- WALLBANG: cel zza zaslonia tez dozwolony — bierzemy najblizszego
+        -- wroga z glowa (srodek glowy; priorytet jak w Fazie1) albo tors.
+        -- ZADNYCH testow widocznosci (headAimPoint/clearOfWalls) — promien
+        -- ma przejsc przez sciane. Filtry isEnemy/isAliveTarget zostaja.
+        if G.__liptonWallbang then
+            for _, e in ipairs_(enemies) do
+                if e[3] then
+                    return e[3], e[3].Position
+                end
+            end
+            for _, e in ipairs_(enemies) do
+                local bp = e[4][1]
+                if bp then
+                    return bp, bp.Position
+                end
+            end
+        end
         -- Faza1: hitbox glowy (powieszony przez expander) MA priorytet —
         -- bez bramki na srodku pudla, bo srodek czesto lezy za sciana,
         -- gdy wystaje juz krawedz albo rog. Kazdy punkt z headAimPoint jest
@@ -3240,9 +3294,23 @@ function startBloxStrikeScript()
         local hit = RaycastLib.cast(origin, unit * range, nil, ignoreList)
         b.Direction = unit
         if hit.instance then
-            b.Distance = (hit.position - origin).Magnitude
+            local wb = G.__liptonWallbang == true
+            local toAim = (aim - origin).Magnitude
+            if wb then
+                b.Distance = toAim
+            else
+                b.Distance = (hit.position - origin).Magnitude
+            end
             local pen = pr.Penetration or 0
-            local through = RaycastLib.castThrough(hit.position - unit * 0.001, unit * (pen + 0.001), pen, ignoreList)
+            local reach, budget
+            if wb then
+                reach = toAim + 4
+                budget = 1e9
+            else
+                reach = pen + 0.001
+                budget = pen
+            end
+            local through = RaycastLib.castThrough(hit.position - unit * 0.001, unit * reach, budget, ignoreList)
             b.Hits = {}
             for i, h in ipairs_(through) do
                 if h.instance and h.material then
@@ -3255,16 +3323,41 @@ function startBloxStrikeScript()
                     })
                 end
             end
+            if wb then
+                -- Utnij przejscie za cialem celu: petla konczy sie na trafieniu
+                -- w nic albo100 iteracji, wiec za wrogiem moga zostac jeszcze
+                -- powierzchnie pokoju/terenu — pakiet ma sie konczyc na parze
+                -- wejscie/wyjscie CELU (tak jak vanilla z budzetem broni).
+                local tmodel = part:FindFirstAncestorWhichIsA("Model")
+                if tmodel then
+                    for i, hh in ipairs_(b.Hits) do
+                        if hh.Instance and hh.Instance:IsDescendantOf(tmodel) then
+                            local keep = i + 1
+                            if keep > #b.Hits then
+                                keep = #b.Hits
+                            end
+                            for j = #b.Hits, keep + 1, -1 do
+                                b.Hits[j] = nil
+                            end
+                            break
+                        end
+                    end
+                end
+            end
         else
             b.Distance = range
             b.Hits = {}
         end
     end
 
-    -- Instalacja wrapper na module klasy Bullet (odporny na re-ekskrypcje:
-    -- po odpaleniu ustawiamy flagę __liptonWrapped, a przełącznik trzyma stan
-    -- we wspoldzielonym _G — kolejne uruchomienie skryptu przejmuje stery)
-    if BulletClass and not BulletClass.__liptonWrapped then
+    -- Instalacja wrapper na module klasy Bullet (odporny na re-ekskrypcje):
+    -- wersja wrapa trzymana w __liptonWrappedVer — gdy w grze stoi juz
+    -- STARY wrapper (np. z poprzedniej wersji pliku), docepiamy nowy NA
+    -- starym: stary redirect odpala sie pierwszy, nasz DRUGI i nadpisuje
+    -- wynik — obowiazuje zawsze najnowszy kod. Przy tej samej wersji nie
+    -- dublujemy lancucha. Stan przelacznikow we wspoldzielonym _G.
+    local WRAP_VER = "wb1"
+    if BulletClass and BulletClass.__liptonWrappedVer ~= WRAP_VER then
         local origCreate = BulletClass.create
         local wrapper = function(wself, ao, ia)
             local b = origCreate(wself, ao, ia)
@@ -3290,6 +3383,7 @@ function startBloxStrikeScript()
             pcall(function()
                 BulletClass.create = wrapper
                 BulletClass.__liptonWrapped = true
+                BulletClass.__liptonWrappedVer = WRAP_VER
             end)
         else
             warn("[SzpontHub] BS Silent Aim: env check odrzucony — wrapper pocisków NIE zainstalowany")
@@ -3518,6 +3612,60 @@ function startBloxStrikeScript()
             pcall(function() bSilent.Text = s end)
         end
     end
+
+    -- TP SHOT — BLINK EGZEKUCJI (helper; wchodzi na listę setfenv obok,
+    -- więc całe środowisko to local-e jako upvalues). Działa TYLKO gdy
+    -- Silent Aim + Wallbang ON (wtedy findSilentTarget sięga po cel zza
+    -- zasłony) i wybrany cel jest realnie zasłonięty. Przebieg: zapis
+    -- pozycji → teleport ~3 j. od ofiary (za jej plecami od nas, na
+    -- wysokości torsu) →0.05 s na replikację pozycji → WYMUSZONA kamera
+    -- na punkcie ofiary (Origin pakietu = ViewportPointToRay kamery; z wygładzeniem ~0.06 s kamera jeszcze leciałaby ze starego miejsca,
+    -- a serwer liczy ray od Origin) → strzał (cel = głowa, bez ściany →
+    -- pełny dmg, AK143 = oneshot) →0.05 s na przetworzenie pakietu →
+    -- powrót. Okno ~0.1 s: inni gracze MOGĄ zobaczyć pośrednią pozycję
+    -- (replikacja ~20-60 Hz) — brak gwarancji niewidoczności; serwer
+    -- może zkickać za nagły skok pozycji — dlatego najpierw test.
+    -- Zwraca true = blink wykonany (pomijamy zwykły strzał z dystansu).
+    local taskWait = task.wait
+    local cfLookAt = CFrame.lookAt
+    local v3new = Vector3.new
+    local tpBusy = false
+    local function tpShotBlink(part, w)
+        if tpBusy then return false end
+        local ch = plr.Character
+        if not ch or ch:GetAttribute("Dead") then return false end
+        local hrp = ch:FindFirstChild("HumanoidRootPart")
+        if not hrp then return false end
+        local saved = hrp.CFrame
+        local tpos = part.Position
+        -- Kotwica = tors ofiary (stoimy na podłożu obok niej, nie na
+        -- wysokości głowy); brak roota → sam punkt celu.
+        local vch = part:FindFirstAncestorWhichIsA("Model")
+        local vroot = vch and vch:FindFirstChild("HumanoidRootPart")
+        local anchor = vroot and vroot.Position or tpos
+        -- Kierunek: od ofiary w stronę swojego starego miejsca (stajemy
+        -- za jej plecami względem nas, minimalnie3 j. — nie w niej).
+        local d = saved.Position - anchor
+        local h = v3new(d.X, 0, d.Z)
+        if h.Magnitude < 1 then h = v3new(0, 0, -3) end
+        h = h.Unit
+        local dest = anchor + h * 3
+        tpBusy = true
+        local ok = pcall_(function()
+            hrp.CFrame = cfLookAt(dest, tpos)
+            taskWait(0.05)
+            local cam = ws.CurrentCamera
+            if cam then cam.CFrame = cfLookAt(dest, tpos) end
+            fireWeapon(w)
+            taskWait(0.05)
+        end)
+        pcall_(function()
+            hrp.CFrame = saved
+        end)
+        tpBusy = false
+        return ok
+    end
+
     local function silentTrigger()
         if not trigClean then return end
         if not G.__liptonSilentAim then return end
@@ -3536,12 +3684,21 @@ function startBloxStrikeScript()
         local part = findSilentTarget(camT.CFrame.Position, ignoreList, G.__liptonLastRange or 1000)
         if not part then return end
         local w = InvCtl.getCurrentEquipped()
+        -- TP SHOT: cel zza zasłoną → blink z bliska zamiast strzału przez
+        -- ścianę; przy czystym LOS normalny strzał (i tak pełny dmg).
+        if G.__liptonTPShot and not tpBusy then
+            local vch = part:FindFirstAncestorWhichIsA("Model")
+            if not clearOfWalls(camT.CFrame.Position, part, vch, ignoreList) then
+                if tpShotBlink(part, w) then return end
+            end
+        end
         fireWeapon(w)
     end
     trigClean = pcall(function()
         setfenv(silentTrigger, {})
         setfenv(fireWeapon, {})
-        for _, f in ipairs({silentTrigger, fireWeapon}) do
+        setfenv(tpShotBlink, {})
+        for _, f in ipairs({silentTrigger, fireWeapon, tpShotBlink}) do
             local e = getfenv(f)
             if e.getgenv or e.hookfunction then
                 error("dirty env")
@@ -3937,6 +4094,7 @@ function startFischScript()
     local autoCast = false
     local autoShake = false
     local autoReel = false
+    local autoAppraise = false
 
     -- PĘTLA AUTOMATYCZNEGO ŁOWIENIA (etap 2 — na żywo w Fisch).
     -- Kolejność w ticku: shake najpierw (minigra tyka), potem
@@ -4135,12 +4293,129 @@ function startFischScript()
             env.SzpontFisch = {
                 autoCast = autoCast,
                 autoShake = autoShake,
-                autoReel = autoReel
+                autoReel = autoReel,
+                appraise = autoAppraise
             }
         end)
         ensureFishingLoop()
     end
     pushFishingState()
+
+    -- AUTO APPRAISE (Fisch): teleport pod Appraisera i spam
+    -- dialogu Appraise z driftwoodem w rece (3 C$ / proba).
+    -- Flow rozmowy rozwiazany na zywo: Talk -> „Can you appraise
+    -- this fish?” -> „Sure! ... Ready?” -> „Yes!” (appraise) ->
+    -- „Can you appraise it again?” -> petla. OptionPress gry
+    -- laczy sie na MouseButton1Click (NIE Activated), po kliknieciu
+    -- natychmiast niszczy opcje i czeka 0.6 s + RF, wiec po
+    -- kliknieciu dajemy grace 2.5 s zanim ewentualnie otworzymy
+    -- rozmowe od nowa (prompt w trakcie aktywnego dialogu to
+    -- no-op serwera). Klik zawsze w task.spawn — run:InvokeServer
+    -- moze sie zawiesic. petla czyta WSPOLNY stan
+    -- env.SzpontFisch.appraise + SzpontFischStop, wiec stare kopie
+    -- po re-iniekcji gasna same (pushFishingState przy starcie
+    -- zeruje stan).
+    local appraiseLoopAlive = false
+    local appraiseNextOpen = 0
+
+    local function appraiseTick()
+        local plr = game:GetService("Players").LocalPlayer
+        local WS = game:GetService("Workspace")
+        local char = plr.Character
+        if not char then return end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hum or hum.Health <= 0 then return end
+        local bp = plr:FindFirstChild("Backpack")
+        local pg = plr.PlayerGui
+
+        -- (1) driftwood musi byc w rece (serwer: „hold out the fish”)
+        local held = char:FindFirstChildWhichIsA("Tool")
+        if not (held and held.Name == "Driftwood") then
+            local dw = bp and bp:FindFirstChild("Driftwood")
+            if dw then
+                hum:EquipTool(dw)
+                appraiseNextOpen = tick() + 1.0
+            end
+            return
+        end
+
+        -- (2) pod Appraiserem (prompt ma maxDist=7, wiec stajemy
+        -- w odleglosci <= 6)
+        local npc = WS:FindFirstChild("Appraiser", true)
+        if not npc then return end
+        local np = npc:GetPivot().Position
+        if (np - char:GetPivot().Position).Magnitude > 6 then
+            pcall(function() plr:RequestStreamAroundAsync(np, 5) end)
+            char:PivotTo(CFrame.new(np + Vector3.new(3, 3, 3)))
+            appraiseNextOpen = tick() + 1.5
+            return
+        end
+
+        -- (3) dialog: szukamy gotowych opcji
+        local opt = pg:FindFirstChild("options")
+        local zone = opt and opt:FindFirstChild("safezone")
+        local pick, hasAny
+        if zone then
+            for i = 1, 6 do
+                local f = zone:FindFirstChild(i .. "option")
+                if f then
+                    hasAny = true
+                    local tl = f:FindFirstChild("text")
+                    local t = tl and string.lower(tl.Text) or ""
+                    if not pick and (
+                        t:find("appraise this fish", 1, true)
+                        or t:find("appraise it again", 1, true)
+                        or t:find("yes!", 1, true)
+                    ) then
+                        pick = f
+                    end
+                end
+            end
+        end
+        if not hasAny then
+            -- brak opcji: po kliknieciu czekamy grace, potem
+            -- otwieramy rozmowe od nowa
+            if tick() < appraiseNextOpen then return end
+            local prompt
+            for _, d in ipairs(npc:GetDescendants()) do
+                if d:IsA("ProximityPrompt") then prompt = d break end
+            end
+            if prompt then
+                prompt:InputHoldBegin()
+                task.wait(0.15)
+                prompt:InputHoldEnd()
+                appraiseNextOpen = tick() + 2.5
+            end
+            return
+        end
+        if not pick then return end
+        local btn = pick:FindFirstChild("button")
+        if not btn then return end
+        task.spawn(function()
+            pcall(function() firesignal(btn.MouseButton1Click) end)
+        end)
+        appraiseNextOpen = tick() + 2.5
+    end
+
+    local function ensureAppraiseLoop()
+        if appraiseLoopAlive then return end
+        appraiseLoopAlive = true
+        task.spawn(function()
+            while true do
+                task.wait(0.5)
+                local stop, on = false, false
+                pcall(function()
+                    local env = (type(getgenv) == "function" and getgenv()) or _G
+                    stop = env.SzpontFischStop == true
+                    local st = env.SzpontFisch
+                    on = st ~= nil and st.appraise == true
+                end)
+                if stop or not on then break end
+                pcall(appraiseTick)
+            end
+            appraiseLoopAlive = false
+        end)
+    end
 
     -- GUI
     local g = Instance.new("ScreenGui")
@@ -4324,6 +4599,14 @@ function startFischScript()
         function() return autoReel end,
         function(v) autoReel = v pushFishingState() end)
     createNote("Włączone: cast, shake i reel działają automatycznie (przetestowane na żywo).", 4, "Fishing")
+    makeToggle("Auto Appraise", 5, "Fishing",
+        function() return autoAppraise end,
+        function(v)
+            autoAppraise = v
+            pushFishingState()
+            if v then ensureAppraiseLoop() end
+        end)
+    createNote("Auto Appraise: teleport do Appraisera i spamuje Appraise (3 C$/sztuka) z driftwoodem w rece.", 6, "Fishing")
 
     -- ZAKŁADKA EXPLOIT: TELEPORT DO MIEJSCOWOŚCI (Fisch).
     -- Nazwy = folder z workspace.world.map; koordynaty = centroidy
@@ -4370,16 +4653,178 @@ function startFischScript()
         { name = "Vertigo", x = -45, y = -717, z = 1403 },
     }
 
+    -- WĘDKI: teleport do miejsca zakupu/zdobycia każdej wędki. Cele =
+    -- Part-y z workspace.zones.player (te same punkty, na których
+    -- stoją gracze; zrzut na żywo, ten place). Nazwa przed " - " =
+    -- wędka, po " - " = lokalizacja (pasuje do filtra Szukaj).
+    -- Cele jaskiniowe/głębokie idą przez exact=true (PivotTo 1:1),
+    -- bo raycast od góry wylądowałby NA dachu sklepienia zamiast
+    -- przy handlarzu.
+    local RODS = {
+        { name = "🎣 Abyssal Specter - Ethereal Abyss", x = -3725, y = -598, z = 1825 },
+        { name = "🎣 Acidgrinder - Underground Music Venue", x = 2048, y = -632, z = 2472 },
+        { name = "🎣 Anchor n' Chain - Ancient Archives", x = -3137, y = -781, z = 1853 },
+        { name = "🎣 Apollo's Sunshot - Apollo's Song of Light", x = -8786, y = -2727, z = 741 },
+        { name = "🎣 Arctic Rod - Northern Summit", x = 19824, y = 138, z = 5292 },
+        { name = "🎣 Aurora Rod - Vertigo", x = -45, y = -717, z = 1403 },
+        { name = "🎣 Avalanche Rod - Overgrowth Caves", x = 20280, y = 191, z = 5380 },
+        { name = "🎣 Bellona's Waraxe - Bellona's Frenzy of War", x = -8794, y = -2161, z = 668 },
+        { name = "🎣 Blade of Glorp - Roslit Bay", x = -1684, y = 339, z = 440 },
+        { name = "🎣 Blazebringer Rod - Roslit Volcano", x = -1967, y = 226, z = 263 },
+        { name = "🎣 Bloomspire - Living Garden", x = -2405, y = -254, z = -2953 },
+        { name = "🎣 Boreal Rod - Boreal Pines", x = 21606, y = 478, z = 3996 },
+        { name = "🎣 Brine-Infused Rod - Brine Pool", x = -1788, y = -119, z = -3384 },
+        { name = "🎣 Carbon Rod - Moosewood Village", x = 468, y = 193, z = 257 },
+        { name = "🎣 Carrot Rod - Carrot Garden", x = 3709, y = -1080, z = -1094 },
+        { name = "🎣 Castbound - Underground Music Venue", x = 2048, y = -632, z = 2472 },
+        { name = "🎣 Celestial Rod - Ancient Archives", x = -3137, y = -781, z = 1853 },
+        { name = "🎣 Cerulean Fang Rod - Luminescent Cavern", x = -1009, y = -318, z = -4374 },
+        { name = "🎣 Challenger's Rod - Challenger's Deep", x = -2191, y = -3808, z = 254 },
+        { name = "🎣 Champions Rod - Atlantis", x = -4424, y = -786, z = 1700 },
+        { name = "🎣 Cheeto Rod - Moosewood Village", x = 468, y = 193, z = 257 },
+        { name = "🎣 Cinder Block Rod - The Laboratory", x = -1944, y = 303, z = -512 },
+        { name = "🎣 Coral Rod - Coral Bastion", x = 2494, y = -1032, z = 843 },
+        { name = "🎣 Crew Rod - Moosewood Village", x = 468, y = 193, z = 257 },
+        { name = "🎣 Cryolash - Boreal Pines", x = 21606, y = 478, z = 3996 },
+        { name = "🎣 Crystalized Rod - Frigid Cavern", x = 19903, y = 479, z = 5356 },
+        { name = "🎣 Cusk Purger - Ancient Archives", x = -3137, y = -781, z = 1853 },
+        { name = "🎣 Daybreaker Rod - Ashbrook Town", x = -5159, y = 194, z = -1451 },
+        { name = "🎣 Dead Man's Rod - Ancient Archives", x = -3137, y = -781, z = 1853 },
+        { name = "🎣 Decayed Rod - Toxic Grove", x = -2624, y = -274, z = -2443 },
+        { name = "🎣 Depthseeker Rod - Atlantis", x = -4424, y = -786, z = 1700 },
+        { name = "🎣 Destiny Rod - The Arch", x = 1083, y = 204, z = -1293 },
+        { name = "🎣 Dreambreaker - Cultist Lair", x = 4346, y = -2035, z = -4675 },
+        { name = "🎣 Duskwike - Underground Music Venue", x = 2048, y = -632, z = 2472 },
+        { name = "🎣 Eidolon Rod - The Sanctum", x = 4442, y = -2680, z = -4680 },
+        { name = "🎣 Elder Mossripper - Ancient Archives", x = -3137, y = -781, z = 1853 },
+        { name = "🎣 Ethereal Prism Rod - Calm Zone", x = -4161, y = -11271, z = 1037 },
+        { name = "🎣 Evil Pitchfork - Ancient Archives", x = -3137, y = -781, z = 1853 },
+        { name = "🎣 Fabulous Rod - Calm Zone", x = -4161, y = -11271, z = 1037 },
+        { name = "🎣 Fallen Rod - Tidefall", x = 3692, y = -1091, z = 951 },
+        { name = "🎣 Fast Rod - Moosewood Village", x = 468, y = 193, z = 257 },
+        { name = "🎣 Firefly Rod - Castaway Cliffs", x = 460, y = 236, z = -1939 },
+        { name = "🎣 Flimsy Rod - Moosewood Village", x = 468, y = 193, z = 257 },
+        { name = "🎣 Fortune Rod - Roslit Hamlet", x = -1460, y = 149, z = 702 },
+        { name = "🎣 Free Spirit Rod - Mineshaft", x = -477, y = -808, z = -138 },
+        { name = "🎣 Frog Rod - Mushgrove Swamp", x = 2697, y = 164, z = -757 },
+        { name = "🎣 Fungal Rod - Mushgrove Swamp", x = 2697, y = 164, z = -757 },
+        { name = "🎣 Gardenkeeper Rod - Living Garden", x = -2405, y = -254, z = -2953 },
+        { name = "🎣 Great Rod of Oscar - Oscar's Locker", x = 122, y = -439, z = 3786 },
+        { name = "🎣 Hades' Soul-Scythe - Hades' Underworld", x = -8587, y = -4029, z = 405 },
+        { name = "🎣 Halibut Harpoon - Monty's Lab", x = -10260, y = -476, z = 994 },
+        { name = "🎣 Heaven's Rod - Glacial Grotto", x = 19983, y = 1169, z = 5524 },
+        { name = "🎣 Ice Warpers Rod - Northern Summit", x = 19824, y = 138, z = 5292 },
+        { name = "🎣 Igneous Rupturer - Scoria Reach", x = -5219, y = 392, z = -1520 },
+        { name = "🎣 Katana Rod - Shady Bazaar (Black Market)", x = -2921, y = -970, z = 6038 },
+        { name = "🎣 Kings Rod - Keepers Altar", x = 1264, y = -766, z = -69 },
+        { name = "🎣 Kraken Rod - Kraken Lair", x = -4291, y = -949, z = 2076 },
+        { name = "🎣 Leviathan's Fang Rod - Veil of the Forsaken", x = -4546, y = -11375, z = 6956 },
+        { name = "🎣 Long Rod - Moosewood Village", x = 468, y = 193, z = 257 },
+        { name = "🎣 Lucid Rod - Ancient Archives", x = -3137, y = -781, z = 1853 },
+        { name = "🎣 Lucky Rod - Moosewood Village", x = 468, y = 193, z = 257 },
+        { name = "🎣 Lullaby - Hawaii", x = -1362, y = 200, z = -39998 },
+        { name = "🎣 Luminescent Oath - Luminescent Cavern", x = -1009, y = -318, z = -4374 },
+        { name = "🎣 Magma Rod - Roslit Bay", x = -1684, y = 339, z = 440 },
+        { name = "🎣 Magnet Rod - Terrapin Island", x = 58, y = 150, z = 1940 },
+        { name = "🎣 Marrow Rod - Ancient Isle", x = 5943, y = 328, z = 339 },
+        { name = "🎣 Merlin's Staff - Merlins Hut", x = -931, y = 226, z = -992 },
+        { name = "🎣 Moonlit Rod - Shady Bazaar", x = -2921, y = -970, z = 6038 },
+        { name = "🎣 Nico's Yarncaster - Underground Music Venue", x = 2048, y = -632, z = 2472 },
+        { name = "🎣 Nocturnal Rod - Vertigo", x = -45, y = -717, z = 1403 },
+        { name = "🎣 Onirifalx - The Depths", x = 999, y = -748, z = 1308 },
+        { name = "🎣 Olympian Godbreaker - Olympian Fissure", x = -8828, y = -4273, z = -555 },
+        { name = "🎣 Part - Underground Music Venue", x = 2048, y = -632, z = 2472 },
+        { name = "🎣 Phoenix Rod - Ancient Isle", x = 5943, y = 328, z = 339 },
+        { name = "🎣 Pinion's Aria - Underground Music Venue", x = 2048, y = -632, z = 2472 },
+        { name = "🎣 Plaguereaver - Toxic Grove", x = -2624, y = -274, z = -2443 },
+        { name = "🎣 Plastic Rod - Moosewood Village", x = 468, y = 193, z = 257 },
+        { name = "🎣 Poseidon's Lance - Poseidon's Storm of Floods", x = -8844, y = -3131, z = 700 },
+        { name = "🎣 Poseidon Rod - Poseidon Temple", x = -4281, y = -834, z = 1052 },
+        { name = "🎣 Precision Rod - Ancient Archives", x = -3137, y = -781, z = 1853 },
+        { name = "🎣 Rainbow Cluster Rod - Castaway Cliffs", x = 460, y = 236, z = -1939 },
+        { name = "🎣 Rapid Rod - Roslit Hamlet", x = -1460, y = 149, z = 702 },
+        { name = "🎣 Reinforced Rod - Desolate Deep", x = -1642, y = -182, z = -2842 },
+        { name = "🎣 Remembrance (Departed) - Underground Music Venue", x = 2048, y = -632, z = 2472 },
+        { name = "🎣 Remembrance (Living) - Underground Music Venue", x = 2048, y = -632, z = 2472 },
+        { name = "🎣 Requiem - Ancient Archives", x = -3137, y = -781, z = 1853 },
+        { name = "🎣 Resourceful Rod - Ancient Archives", x = -3137, y = -781, z = 1853 },
+        { name = "🎣 Riptide Rod - Ancient Archives", x = -3137, y = -781, z = 1853 },
+        { name = "🎣 Rod Of The Depths - The Depths", x = 999, y = -748, z = 1308 },
+        { name = "🎣 Rod Of The Eternal King - Ancient Archives", x = -3137, y = -781, z = 1853 },
+        { name = "🎣 Rod Of The Exalted One - The Keeper's Secret", x = 2233, y = -806, z = 1036 },
+        { name = "🎣 Rod Of The Forgotten Fang - Ancient Archives", x = -3137, y = -781, z = 1853 },
+        { name = "🎣 Rod Of The Zenith - Abyssal Zenith", x = -12932, y = -11004, z = 109 },
+        { name = "🎣 Ruinous Oath - Crimson Cavern", x = -995, y = -281, z = -4940 },
+        { name = "🎣 Scarlet Spincaster Rod - Crimson Cavern", x = -995, y = -281, z = -4940 },
+        { name = "🎣 Scurvy Rod - Forsaken Shores", x = -3016, y = 395, z = 1627 },
+        { name = "🎣 Seasons Rod - Ancient Archives", x = -3137, y = -781, z = 1853 },
+        { name = "🎣 Shady Rod - Shady Bazaar", x = -2921, y = -970, z = 6038 },
+        { name = "🎣 SOULREAPER - Underground Music Venue", x = 2048, y = -632, z = 2472 },
+        { name = "🎣 Spirit of the Forest - Everturn Forest", x = 2475, y = 267, z = -2515 },
+        { name = "🎣 Spiritbinder - Ancient Archives", x = -3137, y = -781, z = 1853 },
+        { name = "🎣 Splitbranch Twig - Everturn Forest", x = 2475, y = 267, z = -2515 },
+        { name = "🎣 Steady Rod - Roslit Hamlet", x = -1460, y = 149, z = 702 },
+        { name = "🎣 Steampunk Rod - Underground Music Venue", x = 2048, y = -632, z = 2472 },
+        { name = "🎣 Stone Rod - Ancient Isle", x = 5943, y = 328, z = 339 },
+        { name = "🎣 Summit Rod - Frigid Cavern", x = 19903, y = 479, z = 5356 },
+        { name = "🎣 Sword of Light - Shady Bazaar (Black Market)", x = -2921, y = -970, z = 6038 },
+        { name = "🎣 Tempest Rod - Sunken Depths", x = -4961, y = -772, z = 1824 },
+        { name = "🎣 Terrotrapper - Ancient Isle", x = 5943, y = 328, z = 339 },
+        { name = "🎣 Thalassar's Ruin - Tidefall", x = 3692, y = -1091, z = 951 },
+        { name = "🎣 The Boom Ball - Desolate Deep", x = -1642, y = -182, z = -2842 },
+        { name = "🎣 The Lost Rod - Ancient Archives", x = -3137, y = -781, z = 1853 },
+        { name = "🎣 Tidemourner - Ancient Archives", x = -3137, y = -781, z = 1853 },
+        { name = "🎣 Titanium Rod - Ancient Archives", x = -3137, y = -781, z = 1853 },
+        { name = "🎣 Training Rod - Moosewood Village", x = 468, y = 193, z = 257 },
+        { name = "🎣 Treasure Rod - Treasure Island", x = 8385, y = 154, z = -17250 },
+        { name = "🎣 Trident Rod - Trident Temple", x = -1482, y = -213, z = -2218 },
+        { name = "🎣 Verdant Oath - Living Garden", x = -2405, y = -254, z = -2953 },
+        { name = "🎣 Verdant Shear Rod - Lost Jungle", x = -2760, y = 165, z = -2109 },
+        { name = "🎣 Vineweaver Rod - Ancient Archives", x = -3137, y = -781, z = 1853 },
+        { name = "🎣 Voyager Rod - Ancient Archives", x = -3137, y = -781, z = 1853 },
+        { name = "🎣 Volcanic Rod - Volcanic Vents", x = -2645, y = -2276, z = 818 },
+        { name = "🎣 Wicked Fang Rod - Crimson Cavern", x = -995, y = -281, z = -4940 },
+        { name = "🎣 Wildflower Rod - Terrapin Island", x = 58, y = 150, z = 1940 },
+        { name = "🎣 Wingkeeper - Underground Music Venue", x = 2048, y = -632, z = 2472 },
+        { name = "🎣 Wisdom Rod - Ancient Archives", x = -3137, y = -781, z = 1853 },
+        { name = "🎣 Zeus Rod - Zeus's Sanctuary", x = -4308, y = -621, z = 2717 },
+        { name = "🎣 Zeus's Thundermaul - Zeus's Thunder of Chaos", x = -8844, y = -3432, z = 700 },
+    }
+
     local tpSelected = nil
     local tpListOpen = false
 
-    local tpStatus = createNote("Wybierz lokalizację z listy Teleport...", 3, "Exploit")
+    local tpStatus = createNote("Wybierz lokalizację albo wędkę z listy Teleport... (filtr: pole Szukaj).", 3, "Exploit")
     local tpBtn = createButton("Teleport...", 1, "Exploit")
 
-    -- lista wyboru (dziecko przycisku = wisi dokładnie pod nim)
+    -- SZUKAJ: osobny TextBox ZAWIŚONY POD PRZYCISKIEM (nie wewnątrz
+    -- ScrollingFramea, żeby nie scrollował się z listą). Filtruje
+    -- przyciski po nazwie (case-insensitive, plain find) — przy 150+
+    -- wpisach nie trzeba przewijać listy myszką.
+    local tpSearch = Instance.new("TextBox")
+    tpSearch.Size = UDim2.new(1, 0, 0, 24)
+    tpSearch.Position = UDim2.new(0, 0, 1, 2)
+    tpSearch.BackgroundColor3 = Color3.fromRGB(20, 10, 25)
+    tpSearch.BackgroundTransparency = 0.1
+    tpSearch.BorderSizePixel = 1
+    tpSearch.BorderColor3 = Color3.fromRGB(170, 50, 255)
+    tpSearch.PlaceholderText = "Szukaj: lokalizacja / wedka..."
+    tpSearch.PlaceholderColor3 = Color3.fromRGB(160, 130, 200)
+    tpSearch.Text = ""
+    tpSearch.TextColor3 = Color3.fromRGB(255, 255, 255)
+    tpSearch.TextSize = 12
+    tpSearch.Font = Enum.Font.SourceSansBold
+    tpSearch.TextXAlignment = Enum.TextXAlignment.Left
+    tpSearch.ClearTextOnFocus = false
+    tpSearch.Visible = false
+    tpSearch.ZIndex = 10
+    tpSearch.Parent = tpBtn
+
+    -- lista wyboru (dziecko przycisku = wisi dokładnie pod nim;
+    -- startuje 2 px pod polem Szukaj, żeby filtr był zawsze na wierzchu)
     local tpList = Instance.new("ScrollingFrame")
     tpList.Size = UDim2.new(1, 0, 0, 168)
-    tpList.Position = UDim2.new(0, 0, 1, 2)
+    tpList.Position = UDim2.new(0, 0, 1, 28)
     tpList.BackgroundColor3 = Color3.fromRGB(12, 5, 15)
     tpList.BackgroundTransparency = 0.05
     tpList.BorderSizePixel = 1
@@ -4400,17 +4845,34 @@ function startFischScript()
     local function tpCloseList()
         tpListOpen = false
         tpList.Visible = false
+        tpSearch.Visible = false
+        tpSearch.Text = "" -- kasuje filtr (Text = odpala tpApplyFilter)
         tpBtn.ZIndex = 3
     end
 
-    for i, loc in ipairs(LOCATIONS) do
+    -- WPISY: najpierw 36 lokalizacji, potem 🎣 wędki (RODS). Pętla
+    -- niżej buduje przyciski z tej jednej listy, więc Szukaj widzi
+    -- wszystko naraz. Wędki: exact = PivotTo 1:1 w strefie graczy.
+    local tpEntries = {}
+    for _, loc in ipairs(LOCATIONS) do
+        tpEntries[#tpEntries + 1] = { name = loc.name, x = loc.x, y = loc.y, z = loc.z }
+    end
+    for _, rod in ipairs(RODS) do
+        tpEntries[#tpEntries + 1] = { name = rod.name, x = rod.x, y = rod.y, z = rod.z,
+            exact = true }
+    end
+
+    local tpButtons = {}
+    for i, ent in ipairs(tpEntries) do
+        -- "🎣 Kings Rod - Keepers Altar" -> na przycisku: "🎣 Kings Rod"
+        ent.short = string.match(ent.name, "^(.-) %- ") or ent.name
         local ob = Instance.new("TextButton")
         ob.Size = UDim2.new(1, -6, 0, 22)
         ob.BackgroundColor3 = Color3.fromRGB(20, 10, 25)
         ob.BackgroundTransparency = 0.1
         ob.BorderSizePixel = 1
         ob.BorderColor3 = Color3.fromRGB(170, 50, 255)
-        ob.Text = loc.name
+        ob.Text = ent.name
         ob.TextColor3 = Color3.fromRGB(255, 255, 255)
         ob.TextSize = 12
         ob.Font = Enum.Font.SourceSansBold
@@ -4419,16 +4881,29 @@ function startFischScript()
         ob.ZIndex = 9
         ob.Parent = tpList
         ob.MouseButton1Click:Connect(function()
-            tpSelected = loc
-            tpBtn.Text = "Teleport...: " .. loc.name
-            tpStatus.Text = "Cel: " .. loc.name .. " - kliknij Teleport to location."
+            tpSelected = ent
+            tpBtn.Text = "Teleport...: " .. ent.short
+            tpStatus.Text = "Cel: " .. ent.name .. " - kliknij Teleport to location."
             tpCloseList()
         end)
+        tpButtons[#tpButtons + 1] = ob
     end
+
+    -- FILTR: ukrywa niepasujące wpisy; UIListLayout pomija elementy
+    -- z Visible=false, więc lista zwija się bez dziur.
+    local function tpApplyFilter()
+        local q = string.lower(tpSearch.Text)
+        for _, ob in ipairs(tpButtons) do
+            ob.Visible = q == ""
+                or string.find(string.lower(ob.Text), q, 1, true) ~= nil
+        end
+    end
+    tpSearch:GetPropertyChangedSignal("Text"):Connect(tpApplyFilter)
 
     tpBtn.MouseButton1Click:Connect(function()
         tpListOpen = not tpListOpen
         tpList.Visible = tpListOpen
+        tpSearch.Visible = tpListOpen
         tpBtn.ZIndex = tpListOpen and 8 or 3
     end)
 
@@ -4523,7 +4998,7 @@ function startFischScript()
         end
         local loc = tpSelected
         tpStatus.Text = "Teleport do " .. loc.name .. "..."
-        tpCore(loc.x, loc.y, loc.z, loc.name, tpStatus)
+        tpCore(loc.x, loc.y, loc.z, loc.name, tpStatus, loc.exact)
     end
 
     local tpGo = createButton("Teleport to location", 2, "Exploit")
@@ -4945,6 +5420,8 @@ function startFischScript()
     local uNoclip = false
     local uSpeed = false
     local uFullbright = false
+    local uInstant = false
+    local uStuck = false
     local uFlySpeed = 60
     local uWalkSpeed = 32
 
@@ -4960,6 +5437,8 @@ function startFischScript()
                 noclip = uNoclip,
                 speed = uSpeed,
                 fullbright = uFullbright,
+                instant = uInstant,
+                stuck = uStuck,
                 flySpeed = uFlySpeed,
                 walkSpeed = uWalkSpeed
             }
@@ -5027,6 +5506,75 @@ function startFischScript()
                 for _, p in ipairs(ch:GetChildren()) do
                     if p:IsA("BasePart") then p.CanCollide = true end
                 end
+            end
+        end)
+    end
+
+    -- INSTANT INTERACT (no hold): ProximityPrompt.HoldDuration = 0,
+    -- więc E robi się od razu, bez przytrzymywania (gra trzyma hold
+    -- na 13 z 79 promptach — Collect/Activate). Oryginały zapisane
+    -- przy ON → OFF je przywraca. Sweep przy włączeniu + zdarzenie
+    -- DescendantAdded (streaming tworzy nowe prompty) + pętla co 1 s
+    -- (serwer/lokalny skrypt może podmienić HoldDuration).
+    -- Handler i pętla czytają WSPÓLNY stan env.SzpontUtility.instant
+    -- ORAZ SzpontUtilityStop — stare kopje po re-iniekcji albo po
+    -- "usunięciu skryptu" gasną same (pushUtilityState przy starcie
+    -- zeruje stan).
+    local instantConn = nil
+    local instantLoopAlive = false
+    local instantSaved = {}
+    local function instantSweep()
+        pcall(function()
+            for _, d in ipairs(workspace:GetDescendants()) do
+                if d:IsA("ProximityPrompt") and (d.HoldDuration or 0) > 0 then
+                    if instantSaved[d] == nil then instantSaved[d] = d.HoldDuration end
+                    d.HoldDuration = 0
+                end
+            end
+        end)
+    end
+    local function setInstantInteract(on)
+        pcall(function()
+            if on then
+                if not instantConn then
+                    instantConn = workspace.DescendantAdded:Connect(function(d)
+                        if not d:IsA("ProximityPrompt") then return end
+                        local env = envOf()
+                        if env.SzpontUtilityStop == true then return end
+                        local st = env.SzpontUtility
+                        if not (st and st.instant) then return end
+                        if (d.HoldDuration or 0) > 0 then
+                            instantSaved[d] = d.HoldDuration
+                            d.HoldDuration = 0
+                        end
+                    end)
+                end
+                instantSweep()
+                if not instantLoopAlive then
+                    instantLoopAlive = true
+                    task.spawn(function()
+                        while true do
+                            task.wait(1)
+                            local env = envOf()
+                            if env.SzpontUtilityStop == true then break end
+                            local st = env.SzpontUtility
+                            if not (st and st.instant) then break end
+                            instantSweep()
+                        end
+                        instantLoopAlive = false
+                    end)
+                end
+            else
+                if instantConn then
+                    instantConn:Disconnect()
+                    instantConn = nil
+                end
+                for d, h in pairs(instantSaved) do
+                    pcall(function()
+                        if d.Parent then d.HoldDuration = h end
+                    end)
+                end
+                table.clear(instantSaved)
             end
         end)
     end
@@ -5139,6 +5687,68 @@ function startFischScript()
         end
     end)
 
+    -- AIRSTUCK: blokada POZYCJI co klatkę (CFrame lock + zerowanie
+    -- prędkości) — postać CAŁY czas w jednym punkcie: żadnej
+    -- grawitacji, prądu wody, prądu eventu ani wejścia z klawiatury.
+    -- DIAGNOZA LIVE (werdykt usera): wersja na Anchored NIE nadawała
+    -- się do łowienia — serwer gry odrzucał FishingRod/Cast przy
+    -- anchorze (res=false, user: "jak włączony airstuck nie da sie
+    -- rzucic"). Serwer widzi anchor postaci => odrzucam cast, wiec
+    -- zamiast anchorować, PINUJEMY CFrame: klient jest wlascicielem
+    -- physics postaci, wiec stała pozycja + zerowa predkosc = stoimy
+    -- jak normalny gracz (Anchored=NIGDY true) i cast przechodzi.
+    -- Pętla: Off / SzpontUtilityStop / SzpontFischStop / zniszczone
+    -- GUI => po prostu przestaje pinować (nie ma kotwicy do
+    -- odklejenia = brak ryzyka uwięzienia postaci po stopie).
+    -- Re-iniekcja zeruje stuck w pushUtilityState => stare pętle
+    -- gasną same. Respawn: nowa postać = zamrożenie w JEJ miejscu
+    -- (spawn), nie teleport w stare miejsce.
+    local stuckConn = nil
+    local stuckChar = nil
+    local stuckCF = nil
+    local function setAirStuck(on)
+        if on then
+            local ch = playersService.LocalPlayer.Character
+            local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                stuckChar = ch
+                stuckCF = hrp.CFrame
+            end
+            if not stuckConn then
+                stuckConn = runService.Heartbeat:Connect(function()
+                    local env = envOf()
+                    local st = env.SzpontUtility
+                    local guiAlive = fischGui and fischGui.Parent ~= nil
+                    if env.SzpontUtilityStop == true or env.SzpontFischStop == true
+                        or not (st and st.stuck) or not guiAlive then
+                        stuckConn:Disconnect()
+                        stuckConn = nil
+                        stuckCF = nil
+                        stuckChar = nil
+                        return
+                    end
+                    local ch2 = playersService.LocalPlayer.Character
+                    local hrp2 = ch2 and ch2:FindFirstChild("HumanoidRootPart")
+                    if not hrp2 then return end
+                    if ch2 ~= stuckChar then
+                        stuckChar = ch2
+                        stuckCF = hrp2.CFrame
+                    end
+                    if stuckCF then hrp2.CFrame = stuckCF end
+                    hrp2.AssemblyLinearVelocity = Vector3.zero
+                    hrp2.AssemblyAngularVelocity = Vector3.zero
+                end)
+            end
+        else
+            if stuckConn then
+                stuckConn:Disconnect()
+                stuckConn = nil
+            end
+            stuckCF = nil
+            stuckChar = nil
+        end
+    end
+
     -- PRZEŁĄCZNIKI (jak MM2: Fly / Noclip / Speed Hack)
     makeToggle("Fly", 1, "Utility",
         function() return uFly end,
@@ -5172,6 +5782,35 @@ function startFischScript()
             if v then saveLighting() else restoreLighting() end
             pushUtilityState()
         end)
+    makeToggle("Instant Interact", 5, "Utility",
+        function() return uInstant end,
+        function(v)
+            uInstant = v
+            pushUtilityState()
+            setInstantInteract(v)
+        end)
+    createNote("Instant Interact: E od razu, bez przytrzymywania (hold=0).", 6, "Utility")
+    makeToggle("AirStuck", 10, "Utility",
+        function() return uStuck end,
+        function(v)
+            uStuck = v
+            -- AirStuck wygrywa z Fly: wyłącz go, żeby postać
+            -- nie leciała do góry (Space wciśnięty = fly by ją ciągnął)
+            if v and uFly then
+                uFly = false
+                pcall(function()
+                    local hum = playersService.LocalPlayer.Character
+                        and playersService.LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+                    if hum then
+                        hum.PlatformStand = false
+                        hum.AutoRotate = true
+                    end
+                end)
+            end
+            pushUtilityState()
+            setAirStuck(v)
+        end)
+    createNote("AirStuck: postać zamrożona w miejscu — bez grawitacji, prądu i ruchu (także w powietrzu). Fly wyłącza się sam. Klik OFF = powrót ruchu.", 11, "Utility")
 
     -- SUWAKI jak MM2: Fly Speed 10-5000 (start 60), Walk Speed 16-150 (start 32)
     local function makeSlider(text, order, fillW)
