@@ -44,6 +44,7 @@ pcall(function()
     if targetParent:FindFirstChild("BSFovCircle") then targetParent.BSFovCircle:Destroy() end
     if targetParent:FindFirstChild("BSCrosshair") then targetParent.BSCrosshair:Destroy() end
     if targetParent:FindFirstChild("RivalsFovCircle") then targetParent.RivalsFovCircle:Destroy() end
+    if targetParent:FindFirstChild("MM2FovCircle") then targetParent.MM2FovCircle:Destroy() end
     if targetParent:FindFirstChild("LiptonHubWatermark") then targetParent.LiptonHubWatermark:Destroy() end
     if game.CoreGui:FindFirstChild("LiptonHubHack") then game.CoreGui.LiptonHubHack:Destroy() end
     if game.CoreGui:FindFirstChild("LiptonHubActiveCheats") then game.CoreGui.LiptonHubActiveCheats:Destroy() end
@@ -54,6 +55,7 @@ pcall(function()
     if game.CoreGui:FindFirstChild("BSFovCircle") then game.CoreGui.BSFovCircle:Destroy() end
     if game.CoreGui:FindFirstChild("BSCrosshair") then game.CoreGui.BSCrosshair:Destroy() end
     if game.CoreGui:FindFirstChild("RivalsFovCircle") then game.CoreGui.RivalsFovCircle:Destroy() end
+    if game.CoreGui:FindFirstChild("MM2FovCircle") then game.CoreGui.MM2FovCircle:Destroy() end
     if game.CoreGui:FindFirstChild("LiptonHubWatermark") then game.CoreGui.LiptonHubWatermark:Destroy() end
     -- legacy: GUI z poprzednich wersji (stare nazwy) - sprzatanie dla kompatybilnosci
     if targetParent:FindFirstChild("SzpontHack") then targetParent.SzpontHack:Destroy() end
@@ -67,6 +69,42 @@ pcall(function()
     if game.CoreGui:FindFirstChild("SzpontGameSelect") then game.CoreGui.SzpontGameSelect:Destroy() end
     if game.CoreGui:FindFirstChild("SzpontSkinChanger") then game.CoreGui.SzpontSkinChanger:Destroy() end
 end)
+
+------------------------------------------------------------
+-- NAPRAWA „ERROR" W EKWIPUNKU GRY — od razu po injekcji, zanim ktokolwiek
+-- wejdzie w menu. Gra sama ma błąd kolejności argumentów: AddItem woła
+-- CreateItemFrame("Weapons", "DefaultKnife"), a to trafia do
+-- GetItemInfo("Weapons", "DefaultKnife"), który czyta Sync[2][1], czyli
+-- Sync["DefaultKnife"]["Weapons"] → nil → warn + Materials.ErrorItem,
+-- stąd kafelki "Error". Moduł ItemService jest wspólny dla wszystkich
+-- require'ów, więc JEDNA podmiana funkcji naprawia ekwipunek gry na stałe.
+-- Całość client-side: nie ruszamy remoteów ani danych serwera.
+------------------------------------------------------------
+do
+    local RS = game:GetService("ReplicatedStorage")
+    local okIS, IS = pcall(require, RS:WaitForChild("ClientServices"):WaitForChild("ItemService"))
+    if okIS and type(IS) == "table" and not IS.__SzpFixed then
+        local okSync, Sync = pcall(require, RS:WaitForChild("Database"):WaitForChild("Sync"))
+        if okSync and type(Sync) == "table" then
+            local function fix(fn)
+                if type(fn) ~= "function" then return fn end
+                return function(self, a, b)
+                    -- Sync[x] istnieje tylko dla TYPÓW (Weapons/Effects/...),
+                    -- więc po tym poznajemy, który argument jest czym
+                    local aTyp = (type(a) == "string") and (Sync[a] ~= nil)
+                    local bTyp = (type(b) == "string") and (Sync[b] ~= nil)
+                    if aTyp and not bTyp then
+                        return fn(self, b, a)
+                    end
+                    return fn(self, a, b)
+                end
+            end
+            IS.GetItemInfo = fix(IS.GetItemInfo)
+            IS.FindItemInfo = fix(IS.FindItemInfo)
+            IS.__SzpFixed = true
+        end
+    end
+end
 
 ------------------------------------------------------------
 -- WATERMARK (fioletowy): LiptonHub + FPS + ping — W SAMYM PRAWYM GÓRNYM ROGU.
@@ -213,22 +251,149 @@ local function showGameSelect()
     gameSelectGui.Name = "LiptonHubGameSelect"
     gameSelectGui.ResetOnSpawn = false
     gameSelectGui.Parent = targetParent
+    gameSelectGui.IgnoreGuiInset = true
+    -- WAŻNE: domyślnie ScreenGui ma ZIndexBehavior.Global, przez co dzieci
+    -- gsFrame (domyślny ZIndex 1) lądowały POD falami (ZIndex 2-3) i pod
+    -- czarnym canvas — panel i tekst wyglądały na wygaszone. Sibling =
+    -- ZIndex sortuje tylko wśród rodzeństwa, więc gsFrame (5) wygrywa
+    -- z gsCanvas (1) wraz ze wszystkimi swoimi dziećmi.
+    gameSelectGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+    ------------------------------------------------------------
+    -- TŁO WEDŁUG SHADERA GLSL (fancy waves)
+    -- Shader: y = 0.5 + Σ_{k=1..i} sin(x*k + t + k/2)*0.1 dla i = 1..5,
+    -- a kolor fali to vec3(f*(10-i)/10, f*i/10, f^1.5*1.5) — czyli od
+    -- magenty do błękitu. GUI nie ma shaderów, więc rysujemy każdą falę
+    -- jako łańcuch obracanych segmentów (frame'ów) ustawianych co klatkę.
+    ------------------------------------------------------------
+    local gsCanvas = Instance.new("Frame")
+    gsCanvas.Name = "ShaderBG"
+    gsCanvas.Size = UDim2.new(1, 0, 1, 0)
+    gsCanvas.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    gsCanvas.BackgroundTransparency = 0.3
+    gsCanvas.BorderSizePixel = 0
+    gsCanvas.ClipsDescendants = true
+    gsCanvas.ZIndex = 1
+    gsCanvas.Parent = gameSelectGui
+
+    local WAVE_COLORS = {
+        Color3.fromRGB(255, 26, 255),   -- i=1: magenta
+        Color3.fromRGB(204, 51, 255),
+        Color3.fromRGB(178, 76, 255),
+        Color3.fromRGB(153, 102, 255),
+        Color3.fromRGB(128, 128, 255),  -- i=5: błękit
+    }
+    local WAVES = #WAVE_COLORS
+    local SEGS = 24            -- segmentów na jedną falę
+    local THICK = 3            -- grubość linii
+    local GLOW_THICK = 12      -- grubość "bloomu" pod linią (efekt poświaty)
+
+    -- pozycje x w jednostkach 0..1 (jak gl_FragCoord/resolution), liczone raz
+    local xs = {}
+    for j = 0, SEGS do xs[j + 1] = j / SEGS end
+
+    local lines, glows = {}, {}
+    for w = 1, WAVES do
+        lines[w], glows[w] = {}, {}
+        for j = 1, SEGS do
+            local glow = Instance.new("Frame")
+            glow.AnchorPoint = Vector2.new(0.5, 0.5)
+            glow.Size = UDim2.fromOffset(10, GLOW_THICK)
+            glow.BackgroundColor3 = WAVE_COLORS[w]
+            glow.BackgroundTransparency = 0.72
+            glow.BorderSizePixel = 0
+            glow.ZIndex = 2
+            glow.Parent = gsCanvas
+            glows[w][j] = glow
+
+            local line = Instance.new("Frame")
+            line.AnchorPoint = Vector2.new(0.5, 0.5)
+            line.Size = UDim2.fromOffset(10, THICK)
+            line.BackgroundColor3 = WAVE_COLORS[w]
+            line.BorderSizePixel = 0
+            line.ZIndex = 3
+            line.Parent = gsCanvas
+            lines[w][j] = line
+        end
+    end
+
+    local gsClock = os.clock()
+    local gsConn
+    gsConn = runService.RenderStepped:Connect(function()
+        if not gsCanvas.Parent then
+            gsConn:Disconnect() -- menu zamknięte — sprzątamy
+            return
+        end
+        local W, H = gsCanvas.AbsoluteSize.X, gsCanvas.AbsoluteSize.Y
+        if W <= 0 or H <= 0 then return end
+        local t = (os.clock() - gsClock) * 0.9 -- time*0.9 z shadera
+        local amp = 0.1 * H                    -- 0.1 z shadera
+        local midY = 0.5 * H                   -- uPos.y -= 0.5
+
+        -- wysokości punktów każdej fali (suma sinusów jak w shaderze)
+        local ys = {}
+        for w = 1, WAVES do
+            local row = {}
+            for j = 1, SEGS + 1 do
+                local x = xs[j]
+                local y = midY
+                for k = 1, w do
+                    y = y + math.sin(x * k + t + k / 2) * amp
+                end
+                row[j] = y
+            end
+            ys[w] = row
+        end
+
+        -- ustawiamy segmenty: pozycja w połowie odcinka, obrót wg nachylenia
+        for w = 1, WAVES do
+            local row = ys[w]
+            for j = 1, SEGS do
+                local x0, x1 = xs[j] * W, xs[j + 1] * W
+                local y0, y1 = row[j], row[j + 1]
+                local dx, dy = x1 - x0, y1 - y0
+                local mid = UDim2.fromOffset((x0 + x1) * 0.5, (y0 + y1) * 0.5)
+                local rot = math.deg(math.atan2(dy, dx))
+                local len = math.sqrt(dx * dx + dy * dy) + 1.5 -- lekkie nałożenie, bez szwów
+                local ln, gl = lines[w][j], glows[w][j]
+                ln.Position = mid
+                ln.Size = UDim2.fromOffset(len, THICK)
+                ln.Rotation = rot
+                gl.Position = mid
+                gl.Size = UDim2.fromOffset(len, GLOW_THICK)
+                gl.Rotation = rot
+            end
+        end
+    end)
 
     local gsFrame = Instance.new("Frame")
     gsFrame.Size = UDim2.new(0, 300, 0, 360)
+    gsFrame.ZIndex = 5 -- ramka menu zawsze nad falami
     gsFrame.Position = UDim2.new(0.5, -150, 0.5, -180)
-    gsFrame.BackgroundColor3 = Color3.fromRGB(12, 5, 15)
-    gsFrame.BackgroundTransparency = 0.15
-    gsFrame.BorderSizePixel = 2
-    gsFrame.BorderColor3 = Color3.fromRGB(170, 50, 255)
+    -- jaśniejsze tło niż kiedyś (było 12,5,15 i ginęło na falach),
+    -- prawie nieprzezroczyste, żeby tekst był czytelny
+    gsFrame.BackgroundColor3 = Color3.fromRGB(30, 15, 45)
+    gsFrame.BackgroundTransparency = 0.05
+    gsFrame.BorderSizePixel = 0
     gsFrame.Active = true
     gsFrame.Draggable = true
     gsFrame.Parent = gameSelectGui
 
+    -- fioletowa ramka wokół panelu (zamiast BorderSizePixel)
+    local gsStroke = Instance.new("UIStroke")
+    gsStroke.Color = Color3.fromRGB(170, 50, 255)
+    gsStroke.Thickness = 2
+    gsStroke.Transparency = 0.1
+    gsStroke.Parent = gsFrame
+
+    local gsCorner = Instance.new("UICorner")
+    gsCorner.CornerRadius = UDim.new(0, 8)
+    gsCorner.Parent = gsFrame
+
     local gsTitle = Instance.new("TextLabel")
     gsTitle.Size = UDim2.new(1, 0, 0, 40)
     gsTitle.BackgroundColor3 = Color3.fromRGB(170, 50, 255)
-    gsTitle.BackgroundTransparency = 0.2
+    gsTitle.BackgroundTransparency = 0.1
     gsTitle.BorderSizePixel = 0
     gsTitle.Text = "🔥 LiptonHub Game Select 🔥"
     gsTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -236,12 +401,16 @@ local function showGameSelect()
     gsTitle.Font = Enum.Font.SourceSansBold
     gsTitle.Parent = gsFrame
 
+    local titleCorner = Instance.new("UICorner")
+    titleCorner.CornerRadius = UDim.new(0, 8)
+    titleCorner.Parent = gsTitle
+
     local gsSub = Instance.new("TextLabel")
     gsSub.Size = UDim2.new(1, 0, 0, 25)
     gsSub.Position = UDim2.new(0, 0, 0.16, 0)
     gsSub.BackgroundTransparency = 1
     gsSub.Text = "Choose a game to hack:"
-    gsSub.TextColor3 = Color3.fromRGB(210, 150, 255)
+    gsSub.TextColor3 = Color3.fromRGB(230, 190, 255)
     gsSub.TextSize = 13
     gsSub.Font = Enum.Font.SourceSansBold
     gsSub.Parent = gsFrame
@@ -249,7 +418,7 @@ local function showGameSelect()
     local mm2Btn = Instance.new("TextButton")
     mm2Btn.Size = UDim2.new(0.8, 0, 0, 45)
     mm2Btn.Position = UDim2.new(0.1, 0, 0.26, 0)
-    mm2Btn.BackgroundColor3 = Color3.fromRGB(20, 10, 25)
+    mm2Btn.BackgroundColor3 = Color3.fromRGB(45, 22, 70)
     mm2Btn.BorderColor3 = Color3.fromRGB(170, 50, 255)
     mm2Btn.BorderSizePixel = 2
     mm2Btn.Text = "🔪 MM2"
@@ -263,7 +432,7 @@ local function showGameSelect()
     local bsBtn = Instance.new("TextButton")
     bsBtn.Size = UDim2.new(0.8, 0, 0, 45)
     bsBtn.Position = UDim2.new(0.1, 0, 0.40, 0)
-    bsBtn.BackgroundColor3 = Color3.fromRGB(20, 10, 25)
+    bsBtn.BackgroundColor3 = Color3.fromRGB(45, 22, 70)
     bsBtn.BorderColor3 = Color3.fromRGB(170, 50, 255)
     bsBtn.BorderSizePixel = 2
     bsBtn.Text = "🔫 BloxStrike"
@@ -275,7 +444,7 @@ local function showGameSelect()
     local rivalsBtn = Instance.new("TextButton")
     rivalsBtn.Size = UDim2.new(0.8, 0, 0, 45)
     rivalsBtn.Position = UDim2.new(0.1, 0, 0.54, 0)
-    rivalsBtn.BackgroundColor3 = Color3.fromRGB(20, 10, 25)
+    rivalsBtn.BackgroundColor3 = Color3.fromRGB(45, 22, 70)
     rivalsBtn.BorderColor3 = Color3.fromRGB(170, 50, 255)
     rivalsBtn.BorderSizePixel = 2
     rivalsBtn.Text = "🎯 Rivals"
@@ -287,7 +456,7 @@ local function showGameSelect()
     local fischBtn = Instance.new("TextButton")
     fischBtn.Size = UDim2.new(0.8, 0, 0, 45)
     fischBtn.Position = UDim2.new(0.1, 0, 0.68, 0)
-    fischBtn.BackgroundColor3 = Color3.fromRGB(20, 10, 25)
+    fischBtn.BackgroundColor3 = Color3.fromRGB(45, 22, 70)
     fischBtn.BorderColor3 = Color3.fromRGB(170, 50, 255)
     fischBtn.BorderSizePixel = 2
     fischBtn.Text = "🐟 Fisch"
@@ -301,7 +470,7 @@ local function showGameSelect()
     gsInfo.Position = UDim2.new(0, 0, 0.84, 0)
     gsInfo.BackgroundTransparency = 1
     gsInfo.Text = "Click a button to load the cheat menu"
-    gsInfo.TextColor3 = Color3.fromRGB(160, 130, 200)
+    gsInfo.TextColor3 = Color3.fromRGB(190, 160, 230)
     gsInfo.TextSize = 11
     gsInfo.Font = Enum.Font.SourceSansBold
     gsInfo.Parent = gsFrame
@@ -357,6 +526,15 @@ function startMainScript()
     local hitboxExpander = false
     local hitboxSizeVal = 3
 
+    -- AIMBOT MM2 (REWOLWER SZERYFA) — celownik rusza się TYLKO gdy:
+    -- 1) broń szeryfa (Gun / Revolver / Pistol) jest wzięta DO RĘKI,
+    -- 2) trzymany jest PPM (jak aimbot w BloxStrike).
+    -- Cel = Morderca, celowanie w CIAŁO (klatka/pas, nie głowa).
+    local aimbotEnabled = false
+    local aimbotFov = 50    -- stopnie: stożek selekcji (kółko na ekranie)
+    local aimbotSpeed = 6   -- siła dociskania celownika do celu (1-125)
+    local mm2Ppm = false    -- stan PPM: InputBegan/InputEnded (bez gp)
+
     local targetPlayerName = nil
     local flingTargetEnabled = false
 
@@ -364,6 +542,50 @@ function startMainScript()
     local walkSpeedVal = 32
     local spinSpeedVal = 50
     local farmSpeed = 17
+
+    -- UNIKANIE MORDERCY przy Auto Farm Coins: morderca chodzi z nożem i
+    -- dobiega, więc farma ma trzymać dystans. Suwak 1-50 studów.
+    local farmAvoidDist = 15
+    local farmUi = {}   -- suwak dystansu (jedna tablica zamiast 3 locali:
+                        -- Lua ma limit 200 rejestrów na chunk)
+
+    -- AUTO FARM: progi bezpieczeństwa (opis w sekcji AUTO FARM COINS v3)
+    -- FARM_SAFE_SPEED_CAP: MM2 kopało "Invalid position" (Error 267) powyżej
+    -- ~25-30 studs/sek, więc suwak może pokazywać więcej, ale tyle realnie
+    -- jedzie postać. Chcesz testować szybciej — podnieś tę wartość.
+    local FARM_SAFE_SPEED_CAP = 24
+    local FARM_MAX_STEP = 0.7       -- twardy limit kroku na tick (studs)
+    local FARM_DT_CLAMP = 0.05      -- lag > 50 ms liczymy jako 50 ms
+    local FARM_STUCK_TIME = 3       -- sekundy stania przy monecie bez efektu
+    local FARM_BLACKLIST_TIME = 10  -- sekundy ignorowania takiej monety
+    local FARM_SCAN_INTERVAL = 1    -- odświeżenie listy żywych monet (s)
+    local FARM_EMPTY_SCAN_INTERVAL = 0.75 -- rzadsze odświeżenie, gdy lista pusta
+    local FARM_TARGET_RANGE = 200   -- ignorujemy monety dalej niż X studs
+
+    -- TP FARM: "teleport" do monety co tp.sec sekund (suwak 0.5-5.0 s).
+    -- ANTI-KICK "Invalid position" (Error 267): MM2 kopało za KAŻDĄ próbę
+    -- teleportu przez CFrame — nawet po kawałku (20, potem 8 studów na
+    -- klatkę), nawet z twardą przerwą między skokami. Gra pilnuje surowej
+    -- prędkości postaci, nie sposobu ruchu. Dlatego ruch robimy ZWYKŁYM
+    -- CHODZENIEM przy podniesionym WalkSpeed (tp.walk) i tylko obracamy
+    -- postać w stronę monetY — wykonuje to silnik gry, więc serwer to
+    -- akceptuje, a prędkość i tak jest kosmiczna. Dzielenie CFrame na
+    -- kawałki NIE pomagało — to był zmarnowany ruch.
+    -- Cały stan w JEDNEJ tablicy: Lua ma limit 200 rejestrów lokalnych na
+    -- chunk, a osobny local na każdy parametr wywalał kompilację pliku.
+    local tp = {
+        on = false,   -- wł/wył TP Farma
+        sec = 2,      -- co ile SEKUND teleport (suwak 0.5-5.0)
+        minSec = 0.5,
+        maxSec = 5.0,
+        range = 200,  -- ignorujemy monety dalej niż X studs
+        chunk = 8,    -- (zostawione) studów na klatkę przy metodzie CFrame
+        minGap = 0.8, -- TWARDA przerwa między teleportami (niezależna od suwaka)
+        walk = 200,   -- WalkSpeed używany PODCZAS "teleportu" (ruch chodzeniem)
+        nextAt = 0,   -- kiedy następny teleport
+        scanAt = 0,   -- kiedy odświeżyć listę monet
+        ui = {},      -- przycisk/etykieta/suwak (uzupełniane niżej)
+    }
 
     -- SYSTEM MOTYWÓW (THEMES)
     local currentTheme = "Purple"
@@ -702,6 +924,76 @@ function startMainScript()
     sf4.Parent = sb4
     table.insert(allFrames, sf4)
 
+    -- TP FARM: przycisk + suwak prędkości (Utility, zaraz pod starą farmą).
+    -- suwak 20-250, start na 60 => rel = (60-20)/230 = 0.174
+    -- wszystko trafia do tp.ui (limit 200 rejestrów lokalnych w Lua)
+    tp.ui.btn = createButton("TP Farm: OFF", 29, "Utility")
+
+    tp.ui.lbl = Instance.new("TextLabel")
+    tp.ui.lbl.Size = UDim2.new(0.95, 0, 0, 12)
+    tp.ui.lbl.BackgroundTransparency = 1
+    tp.ui.lbl.TextColor3 = themes[currentTheme].TextCol
+    tp.ui.lbl.TextSize = 11
+    tp.ui.lbl.Font = Enum.Font.SourceSansBold
+    tp.ui.lbl.Text = "TP Time: 2.0s"
+    tp.ui.lbl.LayoutOrder = 30
+    tp.ui.lbl.ZIndex = 3
+    tp.ui.lbl.Parent = pages["Utility"]
+    table.insert(allLabels, tp.ui.lbl)
+
+    tp.ui.bar = Instance.new("TextButton")
+    tp.ui.bar.Size = UDim2.new(0.95, 0, 0, 10)
+    tp.ui.bar.BackgroundColor3 = themes[currentTheme].Dark
+    tp.ui.bar.BorderSizePixel = 1
+    tp.ui.bar.BorderColor3 = themes[currentTheme].Primary
+    tp.ui.bar.Text = ""
+    tp.ui.bar.AutoButtonColor = false
+    tp.ui.bar.LayoutOrder = 31
+    tp.ui.bar.ZIndex = 3
+    tp.ui.bar.Parent = pages["Utility"]
+    table.insert(allSliders, tp.ui.bar)
+
+    tp.ui.fill = Instance.new("Frame")
+    tp.ui.fill.Size = UDim2.new(0.333, 0, 1, 0)  -- 2.0s z zakresu 0.5-5.0
+    tp.ui.fill.BackgroundColor3 = themes[currentTheme].Primary
+    tp.ui.fill.BorderSizePixel = 0
+    tp.ui.fill.ZIndex = 4
+    tp.ui.fill.Parent = tp.ui.bar
+    table.insert(allFrames, tp.ui.fill)
+
+    -- UNIKANIE MORDERCY: suwak 1-50 studów (start 15 => rel = (15-1)/49)
+    farmUi.lbl = Instance.new("TextLabel")
+    farmUi.lbl.Size = UDim2.new(0.95, 0, 0, 12)
+    farmUi.lbl.BackgroundTransparency = 1
+    farmUi.lbl.TextColor3 = themes[currentTheme].TextCol
+    farmUi.lbl.TextSize = 11
+    farmUi.lbl.Font = Enum.Font.SourceSansBold
+    farmUi.lbl.Text = "Murder Dist: 15"
+    farmUi.lbl.LayoutOrder = 32
+    farmUi.lbl.ZIndex = 3
+    farmUi.lbl.Parent = pages["Utility"]
+    table.insert(allLabels, farmUi.lbl)
+
+    farmUi.bar = Instance.new("TextButton")
+    farmUi.bar.Size = UDim2.new(0.95, 0, 0, 10)
+    farmUi.bar.BackgroundColor3 = themes[currentTheme].Dark
+    farmUi.bar.BorderSizePixel = 1
+    farmUi.bar.BorderColor3 = themes[currentTheme].Primary
+    farmUi.bar.Text = ""
+    farmUi.bar.AutoButtonColor = false
+    farmUi.bar.LayoutOrder = 33
+    farmUi.bar.ZIndex = 3
+    farmUi.bar.Parent = pages["Utility"]
+    table.insert(allSliders, farmUi.bar)
+
+    farmUi.fill = Instance.new("Frame")
+    farmUi.fill.Size = UDim2.new(0.286, 0, 1, 0)  -- 15 z zakresu 1-50
+    farmUi.fill.BackgroundColor3 = themes[currentTheme].Primary
+    farmUi.fill.BorderSizePixel = 0
+    farmUi.fill.ZIndex = 4
+    farmUi.fill.Parent = farmUi.bar
+    table.insert(allFrames, farmUi.fill)
+
     local b14 = createButton("Anti-Fling: OFF", 22, "Utility")
     local b15 = createButton("Anti-AFK: OFF", 23, "Utility")
     local b16 = createButton("Fullbright: OFF", 24, "Visuals")
@@ -740,6 +1032,1155 @@ function startMainScript()
     sf5.ZIndex = 4
     sf5.Parent = sb5
     table.insert(allFrames, sf5)
+
+    -- AIMBOT (rewolwer szeryfa): przycisk + suwak FOV + suwak prędkości
+    local bAim = createButton("Aimbot (Rewolwer): OFF", 29, "Combat")
+
+    local slAimFov = Instance.new("TextLabel")
+    slAimFov.Size = UDim2.new(0.95, 0, 0, 12)
+    slAimFov.BackgroundTransparency = 1
+    slAimFov.TextColor3 = themes[currentTheme].TextCol
+    slAimFov.TextSize = 11
+    slAimFov.Font = Enum.Font.SourceSansBold
+    slAimFov.Text = "Aimbot FOV: 50"
+    slAimFov.LayoutOrder = 30
+    slAimFov.ZIndex = 3
+    slAimFov.Parent = pages["Combat"]
+    table.insert(allLabels, slAimFov)
+
+    local sbAimFov = Instance.new("TextButton")
+    sbAimFov.Size = UDim2.new(0.95, 0, 0, 10)
+    sbAimFov.BackgroundColor3 = themes[currentTheme].Dark
+    sbAimFov.BorderSizePixel = 1
+    sbAimFov.BorderColor3 = themes[currentTheme].Primary
+    sbAimFov.Text = ""
+    sbAimFov.AutoButtonColor = false
+    sbAimFov.LayoutOrder = 31
+    sbAimFov.ZIndex = 3
+    sbAimFov.Parent = pages["Combat"]
+    table.insert(allSliders, sbAimFov)
+
+    local sfAimFov = Instance.new("Frame")
+    sfAimFov.Size = UDim2.new(0.54, 0, 1, 0) -- 50 z FOV-u 5-85
+    sfAimFov.BackgroundColor3 = themes[currentTheme].Primary
+    sfAimFov.BorderSizePixel = 0
+    sfAimFov.ZIndex = 4
+    sfAimFov.Parent = sbAimFov
+    table.insert(allFrames, sfAimFov)
+
+    local slAimSpeed = Instance.new("TextLabel")
+    slAimSpeed.Size = UDim2.new(0.95, 0, 0, 12)
+    slAimSpeed.BackgroundTransparency = 1
+    slAimSpeed.TextColor3 = themes[currentTheme].TextCol
+    slAimSpeed.TextSize = 11
+    slAimSpeed.Font = Enum.Font.SourceSansBold
+    slAimSpeed.Text = "Aimbot Speed: 6"
+    slAimSpeed.LayoutOrder = 32
+    slAimSpeed.ZIndex = 3
+    slAimSpeed.Parent = pages["Combat"]
+    table.insert(allLabels, slAimSpeed)
+
+    local sbAimSpeed = Instance.new("TextButton")
+    sbAimSpeed.Size = UDim2.new(0.95, 0, 0, 10)
+    sbAimSpeed.BackgroundColor3 = themes[currentTheme].Dark
+    sbAimSpeed.BorderSizePixel = 1
+    sbAimSpeed.BorderColor3 = themes[currentTheme].Primary
+    sbAimSpeed.Text = ""
+    sbAimSpeed.AutoButtonColor = false
+    sbAimSpeed.LayoutOrder = 33
+    sbAimSpeed.ZIndex = 3
+    sbAimSpeed.Parent = pages["Combat"]
+    table.insert(allSliders, sbAimSpeed)
+
+    local sfAimSpeed = Instance.new("Frame")
+    sfAimSpeed.Size = UDim2.new(0.05, 0, 1, 0) -- 6 z zakresu 1-125
+    sfAimSpeed.BackgroundColor3 = themes[currentTheme].Primary
+    sfAimSpeed.BorderSizePixel = 0
+    sfAimSpeed.ZIndex = 4
+    sfAimSpeed.Parent = sbAimSpeed
+    table.insert(allFrames, sfAimSpeed)
+
+    ------------------------------------------------------------
+    -- ZAKŁADKA "SKINS" — BAZA BRONI I SKINÓW (W 100% CLIENT-SIDE)
+    -- Wszystko bierzemy z bazy SAMEJ gry: ReplicatedStorage.Database.Sync.Weapons
+    --   (1004 pozycje: 632 noże + 356 gunów). Klucz *_G_* / *_K_* = SKIN,
+    --   zwykły klucz (Frostbite, Prismatic...) = BROŃ (tu siedzą Godly i Ancient).
+    --   Pola: ItemName, ItemID (asset SIATKI), Rarity, ItemType (Gun/Knife).
+    -- Dawniej filtr po _G_/_K_ pomijał Godly i Ancient — bo to osobne,
+    -- "zwykłe" klucze — teraz lista pokazuje całą bazę, a filtr dzieli
+    -- ją na skiny i bronie.
+    -- SPAWN dodaje pozycję do EKWIPUNKU gry przez jej własny moduł
+    -- InventoryService:CreateItemFrame — ramka wygląda identycznie jak prawdziwa
+    -- (ikona, kolor rzadkości). To tylko obiekt GUI u Ciebie: ZERO remoteów,
+    -- serwer o niczym nie wie, nie ma ryzyka kicka.
+    ------------------------------------------------------------
+    local skins, skinsLoaded = {}, false
+    local skinFilter = "ALL"
+    local selectedSkin, skinButtons = nil, {}
+    local rarityColors = {}
+    local lbSkinCount, lbSkinSel, skinStatus, skinSearch = nil, nil, nil, nil
+    local skinList, tbSkins = nil, nil
+    local injected = {}          -- [ramka w ekwipunku gry] = {key, name}
+    local lastMeshSkin = nil     -- ostatni skin nałożony na broń (auto-odnawianie)
+    -- deklaracje funkcji NAJPIERW: handlery kliknięć są tworzone
+    -- wcześniej w kodzie, a w Lua odwołanie do locala zapisanego później
+    -- trafiłoby do globala (nil) i wywaliłoby się przy pierwszym kliknięciu
+    local loadSkins, tryApplySelected, restoreOriginals, addToInventory, refreshInjected, applyFilter
+
+    -- suwak zakładek: 5 przycisków musi zmieścić się w menu szerokim na 240 px
+    -- (stare 4 miały 55 px ze skokiem 58 = koniec na 232 px, piąty by wypadł)
+    local tabW, tabGap = 45, 47
+    for i, name in ipairs({ "Combat", "Movement", "Utility", "Visuals" }) do
+        local tb = tabButtons[name]
+        if tb then
+            tb.Size = UDim2.new(0, tabW, 0, 24)
+            tb.Position = UDim2.new(0, 3 + (i - 1) * tabGap, 0, 37)
+            tb.TextSize = 10
+        end
+    end
+    makePage("Skins")
+    tbSkins = Instance.new("TextButton")
+    tbSkins.Size = UDim2.new(0, tabW, 0, 24)
+    tbSkins.Position = UDim2.new(0, 3 + 4 * tabGap, 0, 37)
+    tbSkins.BackgroundColor3 = themes[currentTheme].ButtonBg
+    tbSkins.BackgroundTransparency = 0.2
+    tbSkins.BorderSizePixel = 1
+    tbSkins.BorderColor3 = themes[currentTheme].Primary
+    tbSkins.Text = "Skins"
+    tbSkins.TextColor3 = Color3.fromRGB(255, 255, 255)
+    tbSkins.TextSize = 10
+    tbSkins.Font = Enum.Font.SourceSansBold
+    tbSkins.TextTruncate = Enum.TextTruncate.AtEnd
+    tbSkins.ZIndex = 3
+    tbSkins.Parent = mainFrame
+    tabButtons["Skins"] = tbSkins
+
+    local function rarityColor(name)
+        local c = name and rarityColors[name]
+        if typeof(c) == "Color3" then return c end
+        if type(c) == "string" then
+            local r, g, b = c:match("(%d+%.?%d*),%s*(%d+%.?%d*),%s*(%d+%.?%d*)")
+            if r then
+                return Color3.fromRGB(
+                    math.floor(tonumber(r) * 255 + 0.5),
+                    math.floor(tonumber(g) * 255 + 0.5),
+                    math.floor(tonumber(b) * 255 + 0.5))
+            end
+        end
+        return Color3.fromRGB(255, 255, 255)
+    end
+
+    local lbTitle = Instance.new("TextLabel")
+    lbTitle.Size = UDim2.new(0.95, 0, 0, 16)
+    lbTitle.BackgroundTransparency = 1
+    lbTitle.TextColor3 = themes[currentTheme].TextCol
+    lbTitle.TextSize = 12
+    lbTitle.Font = Enum.Font.SourceSansBold
+    lbTitle.Text = "SKINY (CLIENT-SIDE)"
+    lbTitle.LayoutOrder = 1
+    lbTitle.ZIndex = 3
+    lbTitle.Parent = pages["Skins"]
+    table.insert(allLabels, lbTitle)
+
+    local lbNote = Instance.new("TextLabel")
+    lbNote.Size = UDim2.new(0.95, 0, 0, 24)
+    lbNote.BackgroundTransparency = 1
+    lbNote.TextColor3 = themes[currentTheme].TextCol
+    lbNote.TextSize = 9
+    lbNote.Font = Enum.Font.SourceSans
+    lbNote.TextWrapped = true
+    lbNote.Text = "Widzisz tylko Ty — serwer nie wie, że masz ten skin."
+    lbNote.LayoutOrder = 2
+    lbNote.ZIndex = 3
+    lbNote.Parent = pages["Skins"]
+    table.insert(allLabels, lbNote)
+
+    -- SZUKAJKA: filtruje listę po nazwie, kluczu i rzadkości
+    -- (wpisanie "godly" pokazuje same Godly, "abduction" konkretnego skina)
+    skinSearch = Instance.new("TextBox")
+    skinSearch.Size = UDim2.new(0.95, 0, 0, 20)
+    skinSearch.BackgroundColor3 = themes[currentTheme].Dark
+    skinSearch.BackgroundTransparency = 0.25
+    skinSearch.BorderSizePixel = 1
+    skinSearch.BorderColor3 = themes[currentTheme].Primary
+    skinSearch.TextColor3 = Color3.fromRGB(255, 255, 255)
+    skinSearch.PlaceholderText = "Szukaj: nazwa / rzadkość (np. godly)"
+    skinSearch.PlaceholderColor3 = Color3.fromRGB(160, 160, 160)
+    skinSearch.TextSize = 10
+    skinSearch.Font = Enum.Font.SourceSans
+    skinSearch.ClearTextOnFocus = false
+    skinSearch.LayoutOrder = 3
+    skinSearch.ZIndex = 3
+    skinSearch.Parent = pages["Skins"]
+
+    -- filtr Wszystkie / Skiny / Bronie
+    local filterFrame = Instance.new("Frame")
+    filterFrame.Size = UDim2.new(0.95, 0, 0, 20)
+    filterFrame.BackgroundTransparency = 1
+    filterFrame.LayoutOrder = 4
+    filterFrame.ZIndex = 3
+    filterFrame.Parent = pages["Skins"]
+
+    local filterButtons = {}
+    local function makeFilterBtn(text, value, x)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(0, 62, 0, 20)
+        b.Position = UDim2.new(0, x, 0, 0)
+        b.BackgroundColor3 = themes[currentTheme].ButtonBg
+        b.BackgroundTransparency = 0.2
+        b.BorderSizePixel = 1
+        b.BorderColor3 = themes[currentTheme].Primary
+        b.TextColor3 = Color3.fromRGB(255, 255, 255)
+        b.TextSize = 10
+        b.Font = Enum.Font.SourceSansBold
+        b.Text = text
+        b.ZIndex = 4
+        b.Parent = filterFrame
+        filterButtons[value] = b
+        b.MouseButton1Click:Connect(function()
+            skinFilter = value
+            for v, fb in pairs(filterButtons) do
+                fb.BackgroundColor3 = (v == value) and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
+            end
+            applyFilter()
+        end)
+    end
+    makeFilterBtn("Wszystkie", "ALL", 0)
+    makeFilterBtn("Skiny", "Skin", 66)
+    makeFilterBtn("Bronie", "Weapon", 132)
+
+    skinSearch:GetPropertyChangedSignal("Text"):Connect(function()
+        applyFilter()
+    end)
+
+    -- lista skinów
+    skinList = Instance.new("ScrollingFrame")
+    skinList.Size = UDim2.new(0.95, 0, 0, 165)
+    skinList.BackgroundColor3 = themes[currentTheme].Dark
+    skinList.BackgroundTransparency = 0.35
+    skinList.BorderSizePixel = 1
+    skinList.BorderColor3 = themes[currentTheme].Primary
+    skinList.ScrollBarThickness = 4
+    skinList.ScrollBarImageColor3 = themes[currentTheme].Primary
+    skinList.CanvasSize = UDim2.new(0, 0, 0, 0)
+    skinList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    skinList.ZIndex = 3
+    skinList.LayoutOrder = 5
+    skinList.Parent = pages["Skins"]
+    table.insert(allFrames, skinList)
+
+    local skinListLayout = Instance.new("UIListLayout")
+    skinListLayout.Padding = UDim.new(0, 2)
+    skinListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    skinListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    skinListLayout.Parent = skinList
+
+    lbSkinCount = Instance.new("TextLabel")
+    lbSkinCount.Size = UDim2.new(0.95, 0, 0, 12)
+    lbSkinCount.BackgroundTransparency = 1
+    lbSkinCount.TextColor3 = themes[currentTheme].TextCol
+    lbSkinCount.TextSize = 10
+    lbSkinCount.Font = Enum.Font.SourceSans
+    lbSkinCount.Text = "Baza gry: kliknij zakładkę, żeby wczytać"
+    lbSkinCount.LayoutOrder = 6
+    lbSkinCount.ZIndex = 3
+    lbSkinCount.Parent = pages["Skins"]
+    table.insert(allLabels, lbSkinCount)
+
+    lbSkinSel = Instance.new("TextLabel")
+    lbSkinSel.Size = UDim2.new(0.95, 0, 0, 12)
+    lbSkinSel.BackgroundTransparency = 1
+    lbSkinSel.TextColor3 = themes[currentTheme].TextCol
+    lbSkinSel.TextSize = 11
+    lbSkinSel.Font = Enum.Font.SourceSansBold
+    lbSkinSel.Text = "Pozycja: —"
+    lbSkinSel.LayoutOrder = 7
+    lbSkinSel.ZIndex = 3
+    lbSkinSel.Parent = pages["Skins"]
+    table.insert(allLabels, lbSkinSel)
+
+    local bbSpawn = Instance.new("TextButton")
+    bbSpawn.Size = UDim2.new(0.95, 0, 0, 26)
+    bbSpawn.BackgroundColor3 = themes[currentTheme].ButtonBg
+    bbSpawn.BackgroundTransparency = 0.2
+    bbSpawn.BorderSizePixel = 1
+    bbSpawn.BorderColor3 = themes[currentTheme].Primary
+    bbSpawn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    bbSpawn.TextSize = 12
+    bbSpawn.Font = Enum.Font.SourceSansBold
+    bbSpawn.Text = "SPAWN → ekwipunek"
+    bbSpawn.LayoutOrder = 8
+    bbSpawn.ZIndex = 3
+    bbSpawn.Parent = pages["Skins"]
+    table.insert(allButtons, bbSpawn)
+
+    -- TRZYMANIE W RĘCE: klonuje broń (Twoją albo wzorcową z gry), podmienia
+    -- siatkę na wybrany skin i daje ją do ręki. Wyłącznie lokalne — serwer
+    -- i inni gracze tego nie widzą, więc nie ma ryzykicka bana.
+    local bbHold = Instance.new("TextButton")
+    bbHold.Size = UDim2.new(0.95, 0, 0, 26)
+    bbHold.BackgroundColor3 = themes[currentTheme].ButtonBg
+    bbHold.BackgroundTransparency = 0.2
+    bbHold.BorderSizePixel = 1
+    bbHold.BorderColor3 = themes[currentTheme].Primary
+    bbHold.TextColor3 = Color3.fromRGB(255, 255, 255)
+    bbHold.TextSize = 12
+    bbHold.Font = Enum.Font.SourceSansBold
+    bbHold.Text = "TRZYMAJ W RĘCE (lokalnie)"
+    bbHold.LayoutOrder = 9
+    bbHold.ZIndex = 3
+    bbHold.Parent = pages["Skins"]
+    table.insert(allButtons, bbHold)
+
+    -- druga opcja: podmiana SIATKI w Twojej broni (dawniejsze zachowanie
+    -- Spawna) — też tylko lokalnie, ale widać to już w ręce, nie w ekwipunku
+    local bbMesh = Instance.new("TextButton")
+    bbMesh.Size = UDim2.new(0.95, 0, 0, 20)
+    bbMesh.BackgroundColor3 = themes[currentTheme].ButtonBg
+    bbMesh.BackgroundTransparency = 0.2
+    bbMesh.BorderSizePixel = 1
+    bbMesh.BorderColor3 = themes[currentTheme].Primary
+    bbMesh.TextColor3 = Color3.fromRGB(255, 255, 255)
+    bbMesh.TextSize = 11
+    bbMesh.Font = Enum.Font.SourceSansBold
+    bbMesh.Text = "Nałóż na broń (lokalnie)"
+    bbMesh.LayoutOrder = 10
+    bbMesh.ZIndex = 3
+    bbMesh.Parent = pages["Skins"]
+    table.insert(allButtons, bbMesh)
+
+    local bbRestore = Instance.new("TextButton")
+    bbRestore.Size = UDim2.new(0.95, 0, 0, 22)
+    bbRestore.BackgroundColor3 = themes[currentTheme].ButtonBg
+    bbRestore.BackgroundTransparency = 0.2
+    bbRestore.BorderSizePixel = 1
+    bbRestore.BorderColor3 = themes[currentTheme].Primary
+    bbRestore.TextColor3 = Color3.fromRGB(255, 255, 255)
+    bbRestore.TextSize = 11
+    bbRestore.Font = Enum.Font.SourceSansBold
+    bbRestore.Text = "Przywróć oryginał"
+    bbRestore.LayoutOrder = 11
+    bbRestore.ZIndex = 3
+    bbRestore.Parent = pages["Skins"]
+    table.insert(allButtons, bbRestore)
+
+    skinStatus = Instance.new("TextLabel")
+    skinStatus.Size = UDim2.new(0.95, 0, 0, 26)
+    skinStatus.BackgroundTransparency = 1
+    skinStatus.TextColor3 = themes[currentTheme].TextCol
+    skinStatus.TextSize = 9
+    skinStatus.Font = Enum.Font.SourceSans
+    skinStatus.TextWrapped = true
+    skinStatus.Text = "Gotowy. Wybierz pozycję i kliknij SPAWN."
+    skinStatus.LayoutOrder = 12
+    skinStatus.ZIndex = 3
+    skinStatus.Parent = pages["Skins"]
+    table.insert(allLabels, skinStatus)
+
+    -- ===== LOGIKA =====
+
+    -- szuka Twojej broni danego typu: najpierw w ręce, potem w plecaku
+    local function findWeapon(kind)
+        local pat = (kind == "Gun") and { "gun", "revolver", "pistol" } or { "knife", "blade", "nóż" }
+        local function matchName(t)
+            local n = t.Name:lower()
+            for _, p in ipairs(pat) do
+                if n:find(p) then return true end
+            end
+            return false
+        end
+        local ch, bp = plr.Character, plr:FindFirstChildOfClass("Backpack")
+        local tool = ch and ch:FindFirstChildOfClass("Tool")
+        if tool and matchName(tool) then return tool end
+        if bp then
+            for _, t in ipairs(bp:GetChildren()) do
+                if t:IsA("Tool") and matchName(t) then return t end
+            end
+        end
+        return nil
+    end
+
+    -- podmiana siatki LOKALNIE; oryginał chowamy w atrybutach Toola,
+    -- żeby dało się przywrócić i żeby przeżyło zmianę referencji
+    local function applySkinToTool(tool, skin)
+        local h = tool:FindFirstChild("Handle")
+        if not h then return false, "brak Handle" end
+        local mesh = h:FindFirstChildOfClass("DataModelMesh")
+        if mesh then
+            if not tool:GetAttribute("SzpSkinOld") then
+                tool:SetAttribute("SzpSkinOld", mesh.MeshId)
+                tool:SetAttribute("SzpSkinOldTex", mesh.TextureId)
+            end
+            mesh.MeshId = "http://www.roblox.com/asset/?id=" .. tostring(skin.id)
+            mesh.TextureId = ""
+            return true
+        elseif h:IsA("MeshPart") then
+            if not tool:GetAttribute("SzpSkinOld") then
+                tool:SetAttribute("SzpSkinOld", h.MeshId)
+                tool:SetAttribute("SzpSkinOldTex", h.TextureID)
+            end
+            h.MeshId = "rbxassetid://" .. tostring(skin.id)
+            return true
+        elseif h:IsA("BasePart") then
+            -- PISTOLETY MM2 mają Handle jako ZWYKŁY Part bez żadnej siatki —
+            -- dlatego wcześniej padało "nierozpoznany Handle (Part)" i nie
+            -- dało się nałożyć skina na broń. Doklejamy SpecialMesh; przy
+            -- przywracaniu taki mesh po prostu usuwamy (SzpSkinMeshMade).
+            local nm = Instance.new("SpecialMesh")
+            nm.Parent = h
+            if not tool:GetAttribute("SzpSkinOld") then
+                tool:SetAttribute("SzpSkinOld", "BRAK")
+                tool:SetAttribute("SzpSkinOldTex", "")
+                tool:SetAttribute("SzpSkinMeshMade", true)
+            end
+            nm.MeshId = "http://www.roblox.com/asset/?id=" .. tostring(skin.id)
+            nm.TextureId = ""
+            return true
+        end
+        return false, "nierozpoznany Handle (" .. h.ClassName .. ")"
+    end
+
+    tryApplySelected = function(quiet)
+        if not selectedSkin then
+            if not quiet then skinStatus.Text = "Najpierw wybierz pozycję z listy." end
+            return false
+        end
+        local tool = findWeapon(selectedSkin.slot)
+        if not tool then
+            if not quiet then
+                skinStatus.Text = "Brak broni (" .. tostring(selectedSkin.slot) .. ") — spróbuję przy najbliższej rundzie."
+            end
+            return false
+        end
+        local ok, err = applySkinToTool(tool, selectedSkin)
+        if ok then
+            skinStatus.Text = "OK: " .. tostring(selectedSkin.name) .. " → " .. tool.Name .. " (widzisz tylko Ty)"
+        elseif not quiet then
+            skinStatus.Text = "Błąd: " .. tostring(err)
+        end
+        return ok
+    end
+
+    restoreOriginals = function()
+        local fixed = 0
+        for _, container in ipairs({ plr.Character, plr:FindFirstChildOfClass("Backpack") }) do
+            if container then
+                for _, t in ipairs(container:GetChildren()) do
+                    if t:IsA("Tool") then
+                        local old = t:GetAttribute("SzpSkinOld")
+                        if old then
+                            local h = t:FindFirstChild("Handle")
+                            if t:GetAttribute("SzpSkinMeshMade") and old == "BRAK" then
+                                -- siatkę dokleiliśmy sami (pistolet bez siatki),
+                                -- więc przywracaniem jest jej usunięcie
+                                local mesh = h and h:FindFirstChildOfClass("SpecialMesh")
+                                if mesh then
+                                    mesh:Destroy()
+                                    fixed = fixed + 1
+                                end
+                            else
+                                local mesh = h and h:FindFirstChildOfClass("DataModelMesh")
+                                if mesh then
+                                    mesh.MeshId = old
+                                    mesh.TextureId = t:GetAttribute("SzpSkinOldTex") or ""
+                                    fixed = fixed + 1
+                                elseif h and h:IsA("MeshPart") then
+                                    h.MeshId = old
+                                    fixed = fixed + 1
+                                end
+                            end
+                            t:SetAttribute("SzpSkinOld", nil)
+                            t:SetAttribute("SzpSkinOldTex", nil)
+                            t:SetAttribute("SzpSkinMeshMade", nil)
+                        end
+                    end
+                end
+            end
+        end
+        skinStatus.Text = (fixed > 0) and ("Przywrócono " .. tostring(fixed) .. " broni.") or "Nie ma czego przywracać."
+    end
+
+    ------------------------------------------------------------
+    -- EKWIPUNEK GRY: gra sama buduje swoje ramki przez
+    -- InventoryService:CreateItemFrame("Weapons", klucz, ile) i wrzuca je do
+    -- Main.Weapons.Items.ItemList. Używamy tego samego modułu, więc nasza
+    -- pozycja wygląda dokładnie jak prawdziwa (ikona rbxthumb, kolor rzadkości,
+    -- układ). To wyłącznie dodanie GUI po Twojej stronie — ZERO remoteów.
+    ------------------------------------------------------------
+    local function gameInv()
+        local pg = plr:FindFirstChildOfClass("PlayerGui")
+        local gui = pg and pg:FindFirstChild("MainGUI")
+        local g = gui and gui:FindFirstChild("Game")
+        local inv = g and g:FindFirstChild("Inventory2")
+        local main = inv and inv:FindFirstChild("Main")
+        local w = main and main:FindFirstChild("Weapons")
+        local items = w and w:FindFirstChild("Items")
+        local list = items and items:FindFirstChild("ItemList")
+        local tabs = items and items:FindFirstChild("Tabs")
+        local s = tabs and tabs:FindFirstChild("Search")
+        s = s and s:FindFirstChild("Container")
+        s = s and s:FindFirstChild("SearchText")
+        -- cały łańcuch widoczności zwracamy razem: gra po respawnie potrafi
+        -- nie dokończyć własnej inicjalizacji i zostawić panel Weapons UKRYTY,
+        -- przez co nasza poprawnie wstawiona ramka i tak jest niewidoczna
+        return list, tabs, s, { inv2 = inv, main = main, weapons = w, items = items }
+    end
+
+    -- MM2 potrafi mieć własny skrypt ekwipunku WYŁĄCZONY (Disabled=true).
+    -- Wtedy gra nigdy nie buduje swoich ramek: w liście zostaje tylko
+    -- placeholder "Loading...", panel Weapons zostaje ukryty, a nasza
+    -- poprawnie wstawiona ramka i tak jest niewidoczna — stąd pozorne "OK".
+    -- Włączenie go to wyłącznie odtworzenie normalnego UI gry (client-side).
+    -- Cały blok pomocniczy siedzi w tabeli szpInv, a nie w osobnych
+    -- zmiennych lokalnych: cały skrypt to JEDNA funkcja z limitem 200
+    -- zmiennych lokalnych i każde kilka nowych lokalnych potrafiło ten
+    -- limit przekroczyć (błąd "Out of local registers").
+    local szpInv = {}
+    szpInv.spawned = {}
+
+    szpInv.ensureScript = function()
+        local pg = plr:FindFirstChildOfClass("PlayerGui")
+        local gui = pg and pg:FindFirstChild("MainGUI")
+        local ls = gui and gui:FindFirstChild("Inventory2")
+        if ls and ls:IsA("LocalScript") and ls.Disabled then
+            pcall(function() ls.Disabled = false end)
+            return true
+        end
+        return false
+    end
+
+    -- odkrywa dokładnie to, co odkrywa gra w SwitchInventoryTab("Weapons")
+    szpInv.showPanel = function()
+        local _, _, _, chain = gameInv()
+        if not (chain and chain.inv2 and chain.main and chain.weapons and chain.items) then
+            return false
+        end
+        pcall(function()
+            for _, c in ipairs(chain.main:GetChildren()) do
+                if c:IsA("GuiObject") then c.Visible = (c.Name == "Weapons") end
+            end
+            chain.items.Visible = true
+            chain.weapons.Visible = true
+            chain.main.Visible = true
+            chain.inv2.Visible = true
+        end)
+        -- przy okazji: przemaluj kafelki, które gra zrobiła „Error" przed patchem
+        pcall(function() szpInv.fixErrorFrames() end)
+        return true
+    end
+
+    -- czy ramka JEST widoczna (sprawdzamy wszystkich rodziców, nie tylko jej
+    -- własną flagę — to właśnie rodzic panelu bywał ukryty i „OK" było prawdą
+    -- tylko na papierze)
+    szpInv.frameVisible = function(fr)
+        local p = fr
+        while p and p:IsA("GuiObject") do
+            if not p.Visible then return false end
+            p = p.Parent
+        end
+        return p ~= nil
+    end
+
+    -- NAPRAWA „ERROR" W EKWIPUNKU GRY.
+    -- Gra sama ma błąd kolejności argumentów: AddItem woła
+    -- CreateItemFrame("Weapons", "DefaultKnife") → to idzie do
+    -- GetItemInfo("Weapons", "DefaultKnife"), a ten czyta Sync[2][1], czyli
+    -- Sync["DefaultKnife"]["Weapons"] → nil → warn + Materials.ErrorItem,
+    -- czyli kafelka "Error". Wystarczy raz zamienić argumenty w module
+    -- (moduł jest wspólny dla wszystkich require'ów, więc patch działa
+    -- też dla kodu gry) i ekwipunek wraca do normy.
+    szpInv.patchItemService = function()
+        local RS = game:GetService("ReplicatedStorage")
+        local okIS, IS = pcall(require, RS:WaitForChild("ClientServices"):WaitForChild("ItemService"))
+        if not okIS or type(IS) ~= "table" or IS.__SzpFixed then return false end
+        local okSync, Sync = pcall(require, RS:WaitForChild("Database"):WaitForChild("Sync"))
+        if not okSync or type(Sync) ~= "table" then return false end
+        local function fix(fn)
+            if type(fn) ~= "function" then return fn end
+            return function(self, a, b)
+                -- Sync[x] istnieje tylko dla TYPÓW (Weapons/Guns/Effects...),
+                -- więc po tym poznajemy, który argument jest czym
+                local aTyp = (type(a) == "string") and (Sync[a] ~= nil)
+                local bTyp = (type(b) == "string") and (Sync[b] ~= nil)
+                if aTyp and not bTyp then
+                    return fn(self, b, a)
+                end
+                return fn(self, a, b)
+            end
+        end
+        IS.GetItemInfo = fix(IS.GetItemInfo)
+        IS.FindItemInfo = fix(IS.FindItemInfo)
+        IS.__SzpFixed = true
+        return true
+    end
+    -- od razu przy starcie: ekwipunek gry nigdy nie powinien pokazywać „Error"
+    szpInv.patchItemService()
+
+    -- TRZYMANIE W RĘCE (lokalnie).
+    -- W ReplicatedStorage NIE ma szablonów Tool (bronie klonuje serwer),
+    -- więc klonujemy broń, którą już trzymasz (albo cudzą z Workspace jako
+    -- wzór geometrii), podmieniamy siatkę na wybrany skin i dajemy do ręki.
+    -- Skrypty broni wyciszamy, żeby gra nie strzelała remoteami z naszego
+    -- fałszywego Toola. Całość widoczna wyłącznie u Ciebie.
+    szpInv.holdInHand = function(entry)
+        if not entry then return false, "najpierw wybierz pozycję" end
+        if not entry.id then return false, "pozycja bez asset ID" end
+        szpInv.patchItemService()
+        local ch = plr.Character
+        local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+        if not hum then return false, "brak postaci" end
+        local bp = plr:FindFirstChildOfClass("Backpack")
+        if not bp then return false, "brak Backpack" end
+
+        -- sprzątamy poprzednią lokalną broń, żeby tooli nie mnożyło się
+        -- z każdą zmianą skinu (serwer o tym nie wie, to nasze GUI)
+        for _, cont in ipairs({ ch, bp }) do
+            for _, t in ipairs(cont:GetChildren()) do
+                if t:IsA("Tool") and t:GetAttribute("SzpLocalSkin") then
+                    pcall(function() t:Destroy() end)
+                end
+            end
+        end
+
+        local function isSlot(t, pat)
+            if not (t and t:IsA("Tool")) then return false end
+            local n = t.Name:lower()
+            for _, p in ipairs(pat) do
+                if n:find(p) then return true end
+            end
+            return false
+        end
+        local pat = (entry.slot == "Gun")
+            and { "gun", "revolver", "pistol" }
+            or  { "knife", "blade" }
+
+        -- 1) NAJPIERW PRAWDA: kładziemy skin na TWOJEJ prawdziwej broni.
+        --    Wcześniejsze klonowanie własnego Toola ZAWSZE przegrywało z grą:
+        --    ta przy starcie rundy wyposaża swoją broń, więc nasz lądował
+        --    z powrotem w plecaku — stąd "niewidzialny item w ręce".
+        --    Prawdziwa broń jest dana przez serwer, więc nikt jej nie cofnie,
+        --    a do tego dalej nią strzelasz/cięcisz.
+        local real = ch:FindFirstChildOfClass("Tool")
+        if not (real and isSlot(real, pat)) then
+            real = nil
+            for _, t in ipairs(bp:GetChildren()) do
+                if t:IsA("Tool") and not t:GetAttribute("SzpLocalSkin") and isSlot(t, pat) then
+                    real = t
+                    break
+                end
+            end
+        end
+        if real then
+            local ok, err = applySkinToTool(real, entry)
+            if not ok then return false, err end
+            if real.Parent ~= ch then
+                pcall(function() hum:EquipTool(real) end)
+            end
+            return true, tostring(entry.name) .. " na Twojej broni (" .. real.Name
+                .. ") — widzisz tylko Ty"
+        end
+
+        -- 2) NIE MASZ BRONI (najczęściej Innocent) — wtedy budujemy własny
+        --    Tool. Tu nic Ci jej nie odbierze, więc może spokojnie zostać
+        --    w ręce do końca rundy.
+        local pat2 = pat
+        local template = nil
+        for _, other in ipairs(game:GetService("Players"):GetPlayers()) do
+            if other ~= plr then
+                local oc = other.Character
+                local ot = oc and oc:FindFirstChildOfClass("Tool")
+                if isSlot(ot, pat2) then template = ot break end
+                local ob = other:FindFirstChildOfClass("Backpack")
+                if ob then
+                    for _, t in ipairs(ob:GetChildren()) do
+                        if isSlot(t, pat2) then template = t break end
+                    end
+                end
+                if template then break end
+            end
+        end
+
+        local tool
+        if template then
+            -- klon cudzej broni = prawidłowa geometria i chwyt (grip);
+            -- logikę broni wyciszamy, bo strzelanie/cięcie to remotey serwera
+            tool = template:Clone()
+            for _, d in ipairs(tool:GetDescendants()) do
+                if d:IsA("BaseScript") then d:Destroy() end
+            end
+        else
+            -- brak wzorca — budujemy Toola od zera
+            tool = Instance.new("Tool")
+            tool.RequiresHandle = true
+            local h = Instance.new("Part")
+            h.Name = "Handle"
+            h.Size = (entry.slot == "Gun")
+                and Vector3.new(0.6, 1.2, 2.0)
+                or Vector3.new(0.4, 0.4, 1.4)
+            h.CanCollide = false
+            h.Parent = tool
+        end
+
+        local handle = tool:FindFirstChild("Handle")
+        if not handle then return false, "wzorzec bez Handle" end
+        local mesh = handle:FindFirstChildOfClass("DataModelMesh")
+        if not mesh then
+            mesh = Instance.new("SpecialMesh")
+            mesh.Parent = handle
+        end
+        mesh.MeshId = "http://www.roblox.com/asset/?id=" .. tostring(entry.id)
+        mesh.TextureId = ""   -- siatka sama ma podpiętą teksturę (jak noże MM2)
+
+        tool.Name = tostring(entry.name)
+        tool.CanBeDropped = false
+        tool:SetAttribute("SzpLocalSkin", tostring(entry.key))
+        tool.Parent = bp
+        hum:EquipTool(tool)
+
+        -- pilnujemy, żeby gra nie zepchnęła toola z powrotem do plecaka;
+        -- walkę przerywamy natychmiast, gdy w ręce pojawi się COŚ INNEGO —
+        -- nie odbieramy Ci prawdziwej broni
+        task.spawn(function()
+            while tool.Parent and tool:GetAttribute("SzpLocalSkin") and ch.Parent do
+                task.wait(0.5)
+                if tool.Parent == bp then
+                    if ch:FindFirstChildOfClass("Tool") then break end
+                    pcall(function() hum:EquipTool(tool) end)
+                end
+            end
+        end)
+        return true, tostring(entry.name) .. " w ręce (tylko u Ciebie)"
+    end
+
+    -- NAPRAWA JUŻ ISTNIEJĄCYCH KAFELKÓW „Error".
+    -- Po patchu gra przy kolejnym respawnie zbuduje ekwipunek poprawnie,
+    -- ale te stworzone PRZED patchem mają w sobie ErrorItem. Nie wolno ich
+    -- niszczyć (gra trzyma je w swojej tabeli Frames i jej filtr by się
+    -- wywalił) — przemalowujemy je w miejscu. Kafelki gry rozpoznajemy po
+    -- LayoutOrder, bo GetLayoutOrder zwraca 0=DefaultKnife, 1=DefaultGun.
+    szpInv.fixErrorFrames = function()
+        szpInv.patchItemService()
+        local list = gameInv()
+        if not list then return 0 end
+        local RS = game:GetService("ReplicatedStorage")
+        local okIS, ItemSvc = pcall(require, RS:WaitForChild("ClientServices"):WaitForChild("ItemService"))
+        if not okIS or type(ItemSvc) ~= "table" then return 0 end
+        local fixed = 0
+        for _, c in ipairs(list:GetChildren()) do
+            if c:IsA("GuiObject") and not c.Name:find("SzpHub_", 1, true) then
+                local lbl = c:FindFirstChild("ItemName", true)
+                lbl = lbl and lbl:FindFirstChild("Label")
+                if lbl and lbl.Text == "Error" then
+                    local key
+                    if c.LayoutOrder == 0 then key = "DefaultKnife"
+                    elseif c.LayoutOrder == 1 then key = "DefaultGun" end
+                    if key then
+                        local ok, info = pcall(function() return ItemSvc:GetItemInfo("Weapons", key) end)
+                        if ok and type(info) == "table" then
+                            pcall(function() ItemSvc:ApplyItemToFrame(c, info, 1) end)
+                            pcall(function() ItemSvc:ApplyTags(c, info) end)
+                            fixed = fixed + 1
+                        end
+                    end
+                end
+            end
+        end
+        return fixed
+    end
+    -- przemalowujemy kafelki uszkodzone PRZED patchem (przy starcie i przy
+    -- każdym otwarciu ekwipunku — po respawnie gra i tak zbuduje je dobrze)
+    szpInv.fixErrorFrames()
+
+    -- kliknięcie kafelka w ekwipunku gry = bierzemy go do ręki (lokalnie).
+    szpInv.wireFrame = function(frame, entry)
+        local cont = frame and frame:FindFirstChild("Container")
+        local ab = cont and cont:FindFirstChild("ActionButton")
+        if not ab or ab:GetAttribute("SzpWired") then return end
+        ab:SetAttribute("SzpWired", true)
+        ab.Activated:Connect(function()
+            local ok, err = szpInv.holdInHand(entry)
+            if skinStatus then
+                skinStatus.Text = ok
+                    and ("OK: " .. tostring(err))
+                    or ("Nie da się: " .. tostring(err))
+            end
+        end)
+    end
+
+    -- gra ukrywa ramki spoza wybranej zakładki (Current/Classic/Event) i po
+    -- swojej szukajce — po jej handlerach wymuszamy widoczność naszych ramek,
+    -- inaczej pozycja z eventu byłaby niewidoczna przy domyślnej zakładce
+    refreshInjected = function()
+        local list, _, searchBox = gameInv()
+        if not list then return end
+        local q = (searchBox and string.lower(searchBox.Text or "")) or ""
+        for fr, info in pairs(injected) do
+            local ok = pcall(function()
+                if fr.Parent ~= list then fr.Parent = list end
+                if q == "" then
+                    fr.Visible = true
+                else
+                    fr.Visible = (string.find(string.lower(info.name), q, 1, true) ~= nil)
+                        or (string.find(string.lower(info.key), q, 1, true) ~= nil)
+                end
+            end)
+            if not ok then injected[fr] = nil end   -- ramka padła (gra przebudowała GUI)
+        end
+    end
+
+    szpInv.hookedList = nil
+    szpInv.hookGameInv = function()
+        local list, tabs, searchBox = gameInv()
+        if not list or szpInv.hookedList == list then return end
+        szpInv.hookedList = list
+        for _, tabName in ipairs({ "Current", "Classic", "Event" }) do
+            local tab = tabs and tabs:FindFirstChild(tabName)
+            local view = tab and tab:FindFirstChild("View")
+            if view then
+                view.Activated:Connect(function()
+                    task.wait()   -- dajemy grze wykonać jej filtr; poprawiamy po niej
+                    refreshInjected()
+                end)
+            end
+        end
+        if searchBox then
+            searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+                task.wait()
+                refreshInjected()
+            end)
+        end
+    end
+
+    -- klucze dodane przez użytkownika — ekwipunek gry ma ResetOnSpawn=true,
+    -- więc MM2 kasuje go przy każdym odrodzeniu (a to co rundę). Bez tej
+    -- listy nasze ramki znikałyby kilka sekund po SPAWN i status "OK" byłby
+    -- prawdą tylko do najbliższego odrodzenia.
+
+    szpInv.reqIS = function()
+        local ok, IS = pcall(require, game:GetService("ReplicatedStorage"):WaitForChild("ClientServices"):WaitForChild("InventoryService"))
+        return ok and IS or nil
+    end
+
+    -- odtwarza brakujące ramki po odrodzeniu / przebudowie ekranu ekwipunku
+    szpInv.ensureSpawned = function()
+        szpInv.ensureScript()   -- bez tego gra nie zbuduje nawet własnych ramek
+        if #szpInv.spawned == 0 then return end
+        local list = gameInv()
+        if not list then return end
+        local IS = szpInv.reqIS()
+        if not IS then return end
+        local dodane = 0
+        for _, e in ipairs(szpInv.spawned) do
+            if not list:FindFirstChild("SzpHub_" .. e.key) then
+                local ok, res = pcall(function()
+                    return IS:CreateItemFrame(e.key, "Weapons", 1)
+                end)
+                if ok and type(res) == "table" and res.Frame then
+                    res.Frame.Name = "SzpHub_" .. e.key
+                    res.Frame.Parent = list
+                    injected[res.Frame] = { key = e.key, name = tostring(e.name) }
+                    szpInv.wireFrame(res.Frame, e)
+                    dodane = dodane + 1
+                end
+            end
+        end
+        if dodane > 0 then
+            szpInv.hookGameInv()
+            refreshInjected()
+            -- gra po respawnie potrafi zostawić cały panel Weapons ukrytym
+            -- (nie dokończyła własnej inicjalizacji) — bez tego odkrycia
+            -- odtworzone ramki wisiałyby, ale gracz by ich nie widział
+            szpInv.showPanel()
+        end
+    end
+
+    -- przycisk otwarcia ekwipunku w docku gry: po respawnie to NOWY obiekt,
+    -- więc hook trzeba zakładać ponownie (atribute = znacznik "już podpięte")
+    szpInv.hookOpenButton = function()
+        local g = plr:FindFirstChildOfClass("PlayerGui")
+        g = g and g:FindFirstChild("MainGUI")
+        g = g and g:FindFirstChild("Game")
+        g = g and g:FindFirstChild("Dock")
+        local btn = g and g:FindFirstChild("Inventory")
+        if btn and not btn:GetAttribute("SzpHooked") then
+            btn:SetAttribute("SzpHooked", true)
+            btn.Activated:Connect(function()
+                task.wait(0.4)
+                szpInv.ensureSpawned()
+                -- otwarcie ekwipunku = idealny moment, żeby włączyć wyłączony
+                -- przez grę skrypt ekwipunku i odsłonić panel
+                if szpInv.ensureScript() then task.wait(0.5) end
+                szpInv.showPanel()
+                refreshInjected()
+            end)
+        end
+    end
+
+    addToInventory = function(entry)
+        -- najpierw przywracamy grze jej WŁASNY skrypt ekwipunku (bywa
+        -- Disabled=true) — inaczej po SPAWN ekran i tak wyglądałby pusto
+        szpInv.ensureScript()
+        local list = gameInv()
+        if not list then
+            return false, "nie widzę ekranu ekwipunku gry"
+        end
+        -- ta sama pozycja już wisi w liście? (sprawdzamy SAMĄ listę, nie
+        -- pamięć huba — po respawnie pamięć jest, a ramki nie ma)
+        local mamy = list:FindFirstChild("SzpHub_" .. entry.key)
+        if mamy then
+            pcall(function()
+                mamy.Visible = true
+                injected[mamy] = { key = entry.key, name = tostring(entry.name) }
+            end)
+            szpInv.showPanel()
+            refreshInjected()
+            -- adoptacja = też rejestruj do odtwarzania po respawnie
+            local found = false
+            for _, e in ipairs(szpInv.spawned) do
+                if e.key == entry.key then found = true break end
+            end
+            if not found then
+                table.insert(szpInv.spawned, {
+                    key = entry.key, name = tostring(entry.name),
+                    id = entry.id, slot = entry.slot,
+                })
+            end
+            szpInv.wireFrame(mamy, entry)
+            if szpInv.frameVisible(mamy) then return true, "już jest w ekwipunku (widoczna)" end
+            return true, "w liście, ale gra ukrywa panel — odśwież ekran"
+        end
+        local IS = szpInv.reqIS()
+        if not IS then return false, "brak modułu InventoryService" end
+        local ok, res = pcall(function()
+            -- KOLEJNOŚĆ PARAMETRÓW JEST ODWRÓCONA względem dekompilacji:
+            -- prawdziwa sygnatura to CreateItemFrame(klucz, tabela, ile),
+            -- a nie (tabela, klucz) — w złej kolejności gra zwraca "Error"
+            return IS:CreateItemFrame(entry.key, "Weapons", 1)
+        end)
+        if not ok or type(res) ~= "table" or not res.Frame then
+            return false, "CreateItemFrame: " .. tostring(res):sub(1, 60)
+        end
+        local fr = res.Frame
+        fr.Name = "SzpHub_" .. entry.key
+        fr.Parent = list
+        injected[fr] = { key = entry.key, name = tostring(entry.name) }
+        szpInv.wireFrame(fr, entry)   -- klik w kafelek = bierzemy do ręki
+        local found = false
+        for _, e in ipairs(szpInv.spawned) do
+            if e.key == entry.key then found = true break end
+        end
+        if not found then
+            -- id (asset siatki) i slot muszą przeżyć respawn, bo bez nich
+            -- trzymanie w ręce nie ma czym zbudować Toola
+            table.insert(szpInv.spawned, {
+                key = entry.key, name = tostring(entry.name),
+                id = entry.id, slot = entry.slot,
+            })
+        end
+        szpInv.hookGameInv()
+        refreshInjected()
+        -- wymuszamy odsłonięcie ekranu gry i DOPiero potem raportujemy:
+        -- wcześniejsze "OK" było prawdziwe tylko na papierze, bo panel
+        -- Weapons potrafi być ukryty (inicjalizacja gry niedokończona)
+        task.wait(0.3)   -- dajemy grze chwilę na własną inicjalizację
+        szpInv.showPanel()
+        refreshInjected()
+        if szpInv.frameVisible(fr) then
+            return true, "dodano do ekwipunku (WIDOCZNA)"
+        end
+        return false, "dodano, lecz ekran gry ukrywa panel"
+    end
+
+    -- łączony filtr: typ (wszystkie/skiny/bronie) + szukajka po nazwie,
+    -- kluczu i rzadkości — dlatego wpisanie "godly" albo "ancient" pokazuje
+    -- pozycje, których wcześniej na liście w ogóle nie było
+    applyFilter = function()
+        local q = string.lower((skinSearch and skinSearch.Text) or "")
+        for _, e in ipairs(skins) do
+            local btn = skinButtons[e.key]
+            if btn then
+                local okTyp = (skinFilter == "ALL") or (e.kind == skinFilter)
+                local okTxt = (q == "")
+                    or (string.find(string.lower(e.name), q, 1, true) ~= nil)
+                    or (string.find(string.lower(e.key), q, 1, true) ~= nil)
+                    or (string.find(string.lower(e.rarity), q, 1, true) ~= nil)
+                btn.Visible = okTyp and okTxt
+            end
+        end
+    end
+
+    loadSkins = function()
+        if skinsLoaded then return end
+        skinsLoaded = true
+        skinStatus.Text = "Wczytywanie bazy gry..."
+        local ok, Sync = pcall(function()
+            return require(game:GetService("ReplicatedStorage"):WaitForChild("Database"):WaitForChild("Sync"))
+        end)
+        -- Sync.Weapons to pełna baza (1004 pozycje); Item jest jej kopią,
+        -- dlatego bierzemy Weapons, a Item zostaje jako zapasowe źródło
+        local db = (ok and type(Sync) == "table" and (Sync.Weapons or Sync.Item)) or nil
+        if not ok or type(db) ~= "table" then
+            skinStatus.Text = "Błąd: brak Database.Sync"
+            lbSkinCount.Text = "Baza gry niedostępna"
+            return
+        end
+        rarityColors = (type(Sync.Rarity) == "table" and Sync.Rarity) or {}
+        -- kolejność rzadkości: najrzadsze na górze listy (stąd Godly/Ancient
+        -- są widoczne od razu, a nie schowane gdzieś w środku)
+        local rarRank = {
+            Ancient = 1, Godly = 2, Unique = 3, Legendary = 4, Rare = 5,
+            Uncommon = 6, Common = 7, Classic = 8, Halloween = 9, Christmas = 10,
+        }
+        local nSkin, nWeapon = 0, 0
+        for k, v in pairs(db) do
+            if type(v) == "table" and v.ItemID and (v.ItemType == "Gun" or v.ItemType == "Knife") then
+                local s = tostring(k)
+                local kind = (s:find("_G_") or s:find("_K_")) and "Skin" or "Weapon"
+                if kind == "Skin" then nSkin = nSkin + 1 else nWeapon = nWeapon + 1 end
+                table.insert(skins, {
+                    key = s,
+                    id = v.ItemID,
+                    kind = kind,
+                    slot = v.ItemType,          -- "Gun" albo "Knife"
+                    name = v.ItemName or s,
+                    rarity = v.Rarity or "Common",
+                    year = v.Year,
+                    event = v.Event,
+                })
+            end
+        end
+        table.sort(skins, function(a, b)
+            local ra = rarRank[a.rarity] or 99
+            local rb = rarRank[b.rarity] or 99
+            if ra ~= rb then return ra < rb end
+            return tostring(a.name):lower() < tostring(b.name):lower()
+        end)
+        lbSkinCount.Text = "Pozycji: " .. #skins .. " (skiny " .. nSkin .. ", bronie " .. nWeapon .. ")"
+        skinStatus.Text = "Wybierz pozycję i kliknij SPAWN."
+        for i, e in ipairs(skins) do
+            local b = Instance.new("TextButton")
+            b.Size = UDim2.new(1, -8, 0, 18)
+            b.BackgroundColor3 = themes[currentTheme].ButtonBg
+            b.BackgroundTransparency = 0.3
+            b.BorderSizePixel = 1
+            b.BorderColor3 = themes[currentTheme].Primary
+            b.TextColor3 = rarityColor(e.rarity)
+            b.TextSize = 10
+            b.Font = Enum.Font.SourceSans
+            b.TextXAlignment = Enum.TextXAlignment.Left
+            b.Text = " " .. tostring(e.name) .. "  [" .. tostring(e.rarity) .. "]"
+            b.LayoutOrder = i
+            b.ZIndex = 4
+            b.AutoButtonColor = false
+            b.Visible = (skinFilter == "ALL" or e.kind == skinFilter)
+            b.Parent = skinList
+            b.MouseButton1Click:Connect(function()
+                selectedSkin = e
+                lbSkinSel.Text = "Pozycja: " .. tostring(e.name) .. " [" .. tostring(e.rarity) .. "] "
+                    .. ((e.kind == "Skin") and "(skin)" or "(broń)")
+                for _, other in pairs(skinButtons) do
+                    other.BackgroundTransparency = 0.3
+                end
+                b.BackgroundTransparency = 0
+                skinStatus.Text = "Wybrano: " .. tostring(e.name) .. " — SPAWN doda to do ekwipunku gry."
+            end)
+            skinButtons[e.key] = b
+        end
+    end
+
+    tbSkins.MouseButton1Click:Connect(function()
+        selectTab("Skins")
+        loadSkins()
+        refreshInjected()
+    end)
+
+    -- SPAWN = pozycja w EKWIPUNKU gry (ma się pojawiać w ekwipunku,
+    -- a nie w ręce). Kliknięcie jest w 100% lokalne — zero remoteów.
+    bbSpawn.MouseButton1Click:Connect(function()
+        if not selectedSkin then
+            skinStatus.Text = "Najpierw wybierz pozycję z listy."
+            return
+        end
+        skinStatus.Text = "Dodawanie do ekwipunku..."
+        local ok, err = addToInventory(selectedSkin)
+        skinStatus.Text = ok
+            and ("OK: " .. tostring(selectedSkin.name) .. " jest w ekwipunku (zakładka Weapons gry).")
+            or ("Błąd: " .. tostring(err))
+    end)
+
+    -- TRZYMAJ W RĘCE: klonuje broń, podmienia siatkę na wybrany skin i
+    -- daje ją do ręki. Wyłącznie lokalnie — serwer o niczym nie wie.
+    bbHold.MouseButton1Click:Connect(function()
+        if not selectedSkin then
+            skinStatus.Text = "Najpierw wybierz pozycję z listy."
+            return
+        end
+        skinStatus.Text = "Budowanie broni..."
+        local ok, err = szpInv.holdInHand(selectedSkin)
+        skinStatus.Text = ok and ("OK: " .. tostring(err)) or ("Błąd: " .. tostring(err))
+    end)
+
+    -- druga opcja: podmiana siatki w broni — widać w ręce, dalej tylko lokalnie
+    bbMesh.MouseButton1Click:Connect(function()
+        if not selectedSkin then
+            skinStatus.Text = "Najpierw wybierz pozycję z listy."
+            return
+        end
+        lastMeshSkin = selectedSkin
+        tryApplySelected(false)
+    end)
+
+    bbRestore.MouseButton1Click:Connect(function()
+        restoreOriginals()
+    end)
+
+    -- MM2 daje broń od nowa przy respawnie i co rundę — bez tego hooka
+    -- podmiana siatki przestałaby działać po pierwszej śmierci.
+    -- Działa TYLKO gdy ktoś sam kliknął "Nałóż na broń" (lastMeshSkin),
+    -- więc SPAWN do ekwipunku niczego w ręce nie tyka.
+    plr.CharacterAdded:Connect(function()
+        task.wait(1)
+        if lastMeshSkin then
+            selectedSkin = lastMeshSkin
+            tryApplySelected(true)
+        end
+        -- respawn = NOWY ekran ekwipunku gry (MainGUI ma ResetOnSpawn=true),
+        -- więc nasze ramki trzeba wstawić ponownie
+        task.wait(2.5)
+        szpInv.hookOpenButton()
+        szpInv.ensureSpawned()
+    end)
+    -- podwójna zasługa: gra klonuje MainGUI także poza odrodzeniem
+    local szpPg = plr:FindFirstChildOfClass("PlayerGui")
+    if szpPg then
+        szpPg.ChildAdded:Connect(function(c)
+            if c.Name == "MainGUI" then
+                task.wait(3)
+                szpInv.hookOpenButton()
+                szpInv.ensureSpawned()
+            end
+        end)
+    end
+    szpInv.hookOpenButton()
+    local skinBp = plr:FindFirstChildOfClass("Backpack")
+    if skinBp then
+        skinBp.ChildAdded:Connect(function(c)
+            if c:IsA("Tool") and lastMeshSkin then
+                task.wait(0.25)
+                selectedSkin = lastMeshSkin
+                tryApplySelected(true)
+            end
+        end)
+    end
+    if plr.Character then
+        plr.Character.ChildAdded:Connect(function(c)
+            if c:IsA("Tool") and lastMeshSkin then
+                task.wait(0.25)
+                selectedSkin = lastMeshSkin
+                tryApplySelected(true)
+            end
+        end)
+    end
 
     -- PANEL PO PRAWEJ: 🔥 LiptonHub List 🔥
     local activeCheatsGui = Instance.new("ScreenGui")
@@ -811,10 +2252,12 @@ function startMainScript()
         if autoKillMurder then table.insert(activeList, "• Auto Kill Murder") end
         if flingTargetEnabled then table.insert(activeList, "• Fling: " .. (targetPlayerName or "Brak")) end
         if autoFarmCoins then table.insert(activeList, "• Auto Farm Coins") end
+        if tp.on then table.insert(activeList, "• TP Farm (" .. string.format("%.1f", tp.sec) .. "s)") end
         if antiFling then table.insert(activeList, "• Anti-Fling") end
         if antiAfk then table.insert(activeList, "• Anti-AFK") end
         if fullbrightEnabled then table.insert(activeList, "• Fullbright") end
         if hitboxExpander then table.insert(activeList, "• Hitbox Murderer (" .. hitboxSizeVal .. ")") end
+        if aimbotEnabled then table.insert(activeList, "• Aimbot Rewolwer PPM (FOV " .. aimbotFov .. ")") end
         if thirdPerson then table.insert(activeList, "• Third Person (" .. tpDist .. ")") end
 
         for i, cheatName in ipairs(activeList) do
@@ -1016,17 +2459,27 @@ function startMainScript()
         end
     end)
 
-    local dragging1, dragging2, dragging3, dragging4, dragging5 = false, false, false, false, false
+    -- dragging8 = suwak TP Farma (osobny, żeby nie mieszać się w stan farmy)
+    local dragging1, dragging2, dragging3, dragging4, dragging5, dragging6, dragging7 = false, false, false, false, false, false, false
+    local dragging8 = false
+    local dragging9 = false   -- suwak Murder Dist
 
     sb1.MouseButton1Down:Connect(function() dragging1 = true end)
     sb2.MouseButton1Down:Connect(function() dragging2 = true end)
     sb3.MouseButton1Down:Connect(function() dragging3 = true end)
     sb4.MouseButton1Down:Connect(function() dragging4 = true end)
     sb5.MouseButton1Down:Connect(function() dragging5 = true end)
+    sbAimFov.MouseButton1Down:Connect(function() dragging6 = true end)
+    sbAimSpeed.MouseButton1Down:Connect(function() dragging7 = true end)
+    tp.ui.bar.MouseButton1Down:Connect(function() dragging8 = true end)
+    farmUi.bar.MouseButton1Down:Connect(function() dragging9 = true end)
 
     uis.InputEnded:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1 then
             dragging1, dragging2, dragging3, dragging4, dragging5 = false, false, false, false, false
+            dragging6, dragging7 = false, false
+            dragging8 = false
+            dragging9 = false
         end
     end)
 
@@ -1054,13 +2507,40 @@ function startMainScript()
                 local rel = math.clamp((i.Position.X - sb4.AbsolutePosition.X) / sb4.AbsoluteSize.X, 0, 1)
                 sf4.Size = UDim2.new(rel, 0, 1, 0)
                 farmSpeed = math.floor(5 + rel * 95)
+                -- suwak chodzi 5-100, ale realnie jedzie do FARM_SAFE_SPEED_CAP
+                -- (powyżej progu MM2 kopało "Invalid position") — pokazujemy to
                 sl4.Text = "Farm Speed: " .. farmSpeed
+                    .. (farmSpeed > FARM_SAFE_SPEED_CAP and " (safe " .. FARM_SAFE_SPEED_CAP .. ")" or "")
             elseif dragging5 then
                 local rel = math.clamp((i.Position.X - sb5.AbsolutePosition.X) / sb5.AbsoluteSize.X, 0, 1)
                 sf5.Size = UDim2.new(rel, 0, 1, 0)
                 hitboxSizeVal = math.floor(1 + rel * 49)
                 sl5.Text = "Hitbox Size: " .. hitboxSizeVal
                 updateActiveCheatsList()
+            elseif dragging6 then
+                local rel = math.clamp((i.Position.X - sbAimFov.AbsolutePosition.X) / sbAimFov.AbsoluteSize.X, 0, 1)
+                sfAimFov.Size = UDim2.new(rel, 0, 1, 0)
+                aimbotFov = math.floor(5 + rel * 80) -- 5-85°
+                slAimFov.Text = "Aimbot FOV: " .. aimbotFov
+                updateActiveCheatsList()
+            elseif dragging7 then
+                local rel = math.clamp((i.Position.X - sbAimSpeed.AbsolutePosition.X) / sbAimSpeed.AbsoluteSize.X, 0, 1)
+                sfAimSpeed.Size = UDim2.new(rel, 0, 1, 0)
+                aimbotSpeed = math.floor(1 + rel * 124) -- 1-125
+                slAimSpeed.Text = "Aimbot Speed: " .. aimbotSpeed
+                updateActiveCheatsList()
+            elseif dragging8 then
+                -- suwak TP Farma: CO ILE SEKUND teleport (0.2 - 5.0 s)
+                local rel = math.clamp((i.Position.X - tp.ui.bar.AbsolutePosition.X) / tp.ui.bar.AbsoluteSize.X, 0, 1)
+                tp.ui.fill.Size = UDim2.new(rel, 0, 1, 0)
+                tp.sec = math.floor((tp.minSec + rel * (tp.maxSec - tp.minSec)) * 10) / 10
+                tp.ui.lbl.Text = "TP Time: " .. string.format("%.1f", tp.sec) .. "s"
+            elseif dragging9 then
+                -- suwak unikania mordercy: ile studów dystansu trzymać (1-50)
+                local rel = math.clamp((i.Position.X - farmUi.bar.AbsolutePosition.X) / farmUi.bar.AbsoluteSize.X, 0, 1)
+                farmUi.fill.Size = UDim2.new(rel, 0, 1, 0)
+                farmAvoidDist = math.floor(1 + rel * 49)
+                farmUi.lbl.Text = "Murder Dist: " .. farmAvoidDist
             end
         end
     end)
@@ -1371,6 +2851,56 @@ function startMainScript()
         return checkContainer(player:FindFirstChild("Backpack")) or checkContainer(player.Character) or "Innocent"
     end
 
+    -- LOBBY: w MM2 to osobny model w Workspace ("RegularLobby"), a mapy rund
+    -- spawnują się daleko (w tym serwerze: Z≈9100). Stary filtr szukał partu
+    -- o nazwie "lobby"/SpawnLocation w promieniu 100 studów od jednego partu —
+    -- a lobby ma 226x157x120 studów, więc ludzie stojący w lobby (zabici
+    -- respawnują się tam, kto wszedł w trakcie rundy też) PRZECHODZILI przez
+    -- filtr i Auto Kill All latał do zabitych i machał nożem w powietrze.
+    -- Teraz: bounding boxe'y CAŁYCH modeli *lobby*, odświeżane max co 2 s,
+    -- test punkt-w-pudelku (O(1), zero GetDescendants na wywołanie).
+    local lobbyBoxes, lobbyBoxesAt, lobbySpawns = nil, 0, nil
+    local function getLobbyBoxes()
+        if lobbyBoxes and tick() - lobbyBoxesAt < 2 then return lobbyBoxes end
+        local found = {}
+        for _, obj in pairs(workspace:GetChildren()) do
+            if obj:IsA("Model") and obj.Name:lower():find("lobby") then
+                local ok, cf, size = pcall(function() return obj:GetBoundingBox() end)
+                if ok and cf and size then
+                    table.insert(found, { cf = cf, size = size })
+                end
+            end
+        end
+        -- zapas gdy lobby chwilowo nie ma (przeładowanie): pozycje spawnów,
+        -- zbierane przy tym samym odświeżaniu, nie przy każdym wywołaniu
+        if #found == 0 then
+            lobbySpawns = {}
+            for _, obj in pairs(workspace:GetDescendants()) do
+                if obj:IsA("SpawnLocation") then table.insert(lobbySpawns, obj.Position) end
+            end
+        end
+        lobbyBoxes, lobbyBoxesAt = found, tick()
+        return found
+    end
+
+    local function isInLobby(pos, margin)
+        local boxes = getLobbyBoxes()
+        if #boxes == 0 then
+            for _, sp in pairs(lobbySpawns or {}) do
+                if (sp - pos).Magnitude < 100 then return true end
+            end
+            return false
+        end
+        for _, box in pairs(boxes) do
+            local rel = box.cf:PointToObjectSpace(pos)
+            local half = box.size / 2 + Vector3.new(margin, margin, margin)
+            if math.abs(rel.X) <= half.X and math.abs(rel.Y) <= half.Y and math.abs(rel.Z) <= half.Z then
+                return true
+            end
+        end
+        return false
+    end
+
     local function isTargetValid(target)
         if not target or target == plr then return false end
         local char = target.Character
@@ -1379,11 +2909,8 @@ function startMainScript()
         local hrp = char:FindFirstChild("HumanoidRootPart")
         if not hum or not hrp or hum.Health <= 0 then return false end
         if char:FindFirstChildOfClass("ForceField") then return false end
-        for _, obj in pairs(workspace:GetDescendants()) do
-            if obj:IsA("SpawnLocation") or (obj.Name:lower():find("lobby") and obj:IsA("BasePart")) then
-                if (hrp.Position - obj.Position).Magnitude < 100 then return false end
-            end
-        end
+        -- kto siedzi w lobby (zabici/poczekalnia) — nie ruszamy, tylko na mapie
+        if isInLobby(hrp.Position, 25) then return false end
         return true
     end
 
@@ -1420,70 +2947,355 @@ function startMainScript()
         end
     end)
 
-    local currentTween = nil
+    -- AUTO FARM COINS v3:
+    --  * cel = część z TouchTransmitter (CoinServer.Coin_Server), czyli realny
+    --    punkt podniesienia monety. UWAGA: Coin_Server jest ZAWSZE
+    --    Transparency=1 (widoczną monetę robi dziecko MainCoin), więc
+    --    "niewidoczna" NIE znaczy "zebrana" — liczymy atrybut Collected
+    --    (oraz Delete) i obecność TouchTransmitter, oba sprawdzone na żywo.
+    --  * ANTI-KICK "Invalid position" (Error 267): MM2 kopało za nagły skok
+    --    pozycji, głównie gdy suwak >~25. Stary kod brał surowe dt z
+    --    task.wait — po lag spike'u (dt = 0.5 s) postać skakała 12-15 studów
+    --    w JEDNEJ klatce. Teraz: dt przycięty + twardy limit kroku na tick
+    --    + efektywna prędkość przycięta do progu bezpieczeństwa.
+    --  * ANTI-STUCK: moneta, przy której stoimy i która nic nie zalicza
+    --    (w ścianie / niedostępna / serwer jej nie zbiera), trafia na
+    --    blacklistę — koniec stania w jednym miejscu.
+    --  * bez PlatformStand — postać nie kładzie się na ziemi po monety
+    --  * skanowanie monet przycięte: pusta lista = pełny skan workspace
+    --    raz na kilka sekund, nie 30 razy na sekundę (80k+ instancji = lag)
+    -- Progi (FARM_*) są zadeklarowane wyżej, przy suwaku farmSpeed.
+    local coinCache = {}
+    local coinScanClock = 999
+    local coinBlacklist = {}   -- Part monety -> os.clock() końca blokady
+    local farmStuckCoin = nil  -- moneta, przy której stoimy bez efektu
+    local farmStuckClock = 0
+    local farmFullScanTick = 0
+
+    local function isCoinAlive(part)
+        if not part or not part.Parent then return false end
+        -- gra oznacza zebraną monetę atrybutem Collected (CoinVisualizer tego używa),
+        -- a część dotykowa bywa niewidoczna (Transparency=1) nawet gdy moneta żyje
+        if part:GetAttribute("Collected") or part:GetAttribute("Delete") then return false end
+        for _, d in ipairs(part:GetDescendants()) do
+            if d:GetAttribute("Collected") or d:GetAttribute("Delete") then return false end
+        end
+        return true
+    end
+
+    local function findTouchPart(server)
+        -- bywa tak, że Coin_Server (Part z TouchTransmitter) jest bezpośrednim
+        -- dzieckiem CoinContainer, a bywa zagnieżdżony w Modelu — sprawdzamy oba
+        if server:IsA("BasePart") and server:FindFirstChildOfClass("TouchTransmitter") then
+            return server
+        end
+        for _, d in ipairs(server:GetDescendants()) do
+            if d:IsA("BasePart") and d:FindFirstChildOfClass("TouchTransmitter") then
+                return d
+            end
+        end
+        return nil
+    end
+
+    local function collectCoinsFrom(container)
+        for _, server in ipairs(container:GetChildren()) do
+            local touchPart = findTouchPart(server)
+            if touchPart and isCoinAlive(touchPart) then
+                table.insert(coinCache, touchPart)
+            end
+        end
+    end
+
+    local function refreshCoinCache(full)
+        coinCache = {}
+        -- mapy leżą jako bezpośredni children workspace, więc szukamy szybko
+        for _, map in ipairs(workspace:GetChildren()) do
+            local container = map:FindFirstChild("CoinContainer")
+            if container then
+                collectCoinsFrom(container)
+            elseif map.Name == "CoinContainer" then
+                collectCoinsFrom(map)
+            end
+        end
+        -- pełny skan workspace (80k+ instancji) tylko od święta: stary kod
+        -- robił go 30 razy na sekundę, gdy nie było żywych monet → straszny lag
+        if full and #coinCache == 0 then
+            -- fallback: monety w nietypowym miejscu
+            for _, d in ipairs(workspace:GetDescendants()) do
+                if d.Name == "CoinContainer" then
+                    collectCoinsFrom(d)
+                end
+            end
+        end
+    end
 
     b13.MouseButton1Click:Connect(function()
         autoFarmCoins = not autoFarmCoins
         b13.Text = autoFarmCoins and "Auto Farm Coins: ON" or "Auto Farm Coins: OFF"
         b13.BackgroundColor3 = autoFarmCoins and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
+        -- obie farmy ustawiają CFrame — razem walczyłyby o postać,
+        -- więc włączenie jednej wyłącza drugą
+        if autoFarmCoins and tp.on then
+            tp.on = false
+            tp.ui.btn.Text = "TP Farm: OFF"
+            tp.ui.btn.BackgroundColor3 = themes[currentTheme].ButtonBg
+        end
         updateActiveCheatsList()
-        if not autoFarmCoins then
-            if currentTween then currentTween:Cancel() currentTween = nil end
-            if plr.Character and plr.Character:FindFirstChild("Humanoid") then
-                plr.Character.Humanoid.PlatformStand = false
+        if autoFarmCoins then
+            coinScanClock = 999 -- wymuś odświeżenie listy monet od razu
+            farmStuckCoin, farmStuckClock = nil, 0
+        elseif plr.Character then
+            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+            if hum then hum.AutoRotate = true end
+        end
+    end)
+
+    tp.ui.btn.MouseButton1Click:Connect(function()
+        tp.on = not tp.on
+        tp.ui.btn.Text = tp.on and "TP Farm: ON" or "TP Farm: OFF"
+        tp.ui.btn.BackgroundColor3 = tp.on and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
+        if tp.on and autoFarmCoins then
+            autoFarmCoins = false
+            b13.Text = "Auto Farm Coins: OFF"
+            b13.BackgroundColor3 = themes[currentTheme].ButtonBg
+        end
+        updateActiveCheatsList()
+        if tp.on then
+            tp.nextAt = 0        -- pierwszy teleport od razu
+            tp.scanAt = 0        -- i od razu odśwież listę monet
+        elseif plr.Character then
+            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+            if hum then hum.AutoRotate = true end
+        end
+    end)
+
+    -- Pętla TP Farma: co tp.sec sekund teleport do najbliższej monety.
+    -- Cała logika WEWNĄTRZ pętli celowo — Lua ma limit 200 rejestrów
+    -- lokalnych na chunk, a osobny local na helper wywalał kompilację pliku.
+    task.spawn(function()
+        while true do
+            task.wait(0.02)
+            if tp.on then
+                local now = os.clock()
+
+                -- własny odświeżacz listy monet — NIE tykamy coinScanClock,
+                -- bo to licznik starej farmy i wspólny go psułby
+                if now >= tp.scanAt then
+                    refreshCoinCache(false)
+                    tp.scanAt = now + (#coinCache > 0 and 1.5 or 0.75)
+                end
+
+                if now >= tp.nextAt then
+                    local char = plr.Character
+                    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                    local hum = char and char:FindFirstChildOfClass("Humanoid")
+
+                    if hrp and hum and hum.Health > 0 then
+                        local nearest, bestDist = nil, tp.range
+                        for i = #coinCache, 1, -1 do
+                            local c = coinCache[i]
+                            if not isCoinAlive(c) then
+                                table.remove(coinCache, i)
+                            elseif not coinBlacklist[c] then
+                                local d = (hrp.Position - c.Position).Magnitude
+                                if d < bestDist then
+                                    bestDist, nearest = d, c
+                                end
+                            end
+                        end
+
+                        if nearest then
+                            local target = nearest.Position
+
+                            -- ANTI-KICK "Invalid position" (Error 267): teleport
+                            -- przez CFrame kopał NAWET po kawałku i nawet na
+                            -- "najbezpieczniejszych" ustawieniach — MM2 pilnuje
+                            -- surowej prędkości postaci, a nie sposobu ruchu.
+                            -- Dlatego "teleport" robimy ZWYKŁYM CHODZENIEM przy
+                            -- podniesionym WalkSpeed: ruch idzie przez silnik gry,
+                            -- więc serwer go akceptuje, a i tak lecimy błyskawicznie
+                            -- (200 stud/s = 12× normalny chód). Sterujemy TYLKO
+                            -- obrotem — CFrame bez translacji nie jest walidowany
+                            -- jako zmiana pozycji, więc nie kopa.
+                            local starySpeed = hum.WalkSpeed
+                            local staryRot = hum.AutoRotate
+                            hum.WalkSpeed = tp.walk
+                            hum.AutoRotate = false
+
+                            local koniec = os.clock() + 4
+                            while os.clock() < koniec do
+                                task.wait(0.05)
+                                if not tp.on or hum.Health <= 0 then break end
+                                local off = target - hrp.Position
+                                if off.Magnitude <= 3.2 then break end
+                                hrp.CFrame = CFrame.lookAt(
+                                    hrp.Position,
+                                    Vector3.new(target.X, hrp.Position.Y, target.Z))
+                            end
+
+                            hum.WalkSpeed = starySpeed
+                            hum.AutoRotate = staryRot
+
+                            -- Touched odpala się przy STARCIE kolizji, więc samo
+                            -- stanie przy monecie nic nie zalicza: odskakujemy
+                            -- i wracamy (kilkanaście studów = bezpieczne)
+                            local pos = hrp.Position
+                            hrp.CFrame = CFrame.new(pos + Vector3.new(2.4, 0.3, 0))
+                            task.wait(0.08)
+                            hrp.CFrame = CFrame.new(pos)
+                            task.wait(0.08)
+
+                            tp.nextAt = os.clock() + math.max(tp.sec, tp.minGap)
+                        else
+                            tp.nextAt = now + 0.5 -- brak monet: sprawdzaj częściej
+                        end
+                    else
+                        tp.nextAt = now + 0.5
+                    end
+                end
             end
         end
     end)
 
     task.spawn(function()
         while true do
-            task.wait(0.05)
+            local rawDt = task.wait(0.02)
+            -- ANTI-KICK: dt przycięte — po lag spike'u postać NIE robi dużego
+            -- skoku (stary kod: speed * 0.5 s = 12-15 studów w jedną klatkę,
+            -- serwer MM2 kopał za "Invalid position")
+            local dt = math.min(rawDt, FARM_DT_CLAMP)
+
+            -- wygasanie blokad na monety
+            local now = os.clock()
+            for coin, untilT in pairs(coinBlacklist) do
+                if now >= untilT or not coin.Parent then
+                    coinBlacklist[coin] = nil
+                end
+            end
+
             if autoFarmCoins and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
                 local hrp = plr.Character.HumanoidRootPart
-                local hum = plr.Character:FindFirstChild("Humanoid")
-                local nearestCoin = nil
-                local shortestDistance = math.huge
+                local hum = plr.Character:FindFirstChildOfClass("Humanoid")
 
-                for _, v in pairs(workspace:GetDescendants()) do
-                    if v:IsA("BasePart") and (v.Name == "Coin_Server" or v.Name == "Coin" or v.Name:lower():find("coin")) then
-                        if v.Transparency < 1 and v.Parent then
-                            local dist = (hrp.Position - v.Position).Magnitude
-                            if dist < shortestDistance then
-                                shortestDistance = dist
-                                nearestCoin = v
-                            end
+                coinScanClock = coinScanClock + dt
+                local empty = #coinCache == 0
+                if coinScanClock >= (empty and FARM_EMPTY_SCAN_INTERVAL or FARM_SCAN_INTERVAL) then
+                    coinScanClock = 0
+                    -- pełny skan workspace tylko co 4 odświeżenie, gdy lista pusta
+                    farmFullScanTick = farmFullScanTick + 1
+                    refreshCoinCache(empty and farmFullScanTick % 4 == 0)
+                end
+
+                -- UNIKANIE MORDERCY (suwak "Murder Dist", 1-50 studów): sprawdzamy
+                -- mordercę PRZED wyborem monety, żeby ucieczka działała też wtedy,
+                -- gdy monet akurat nie ma (stanie w miejscu = free kill dla noża).
+                local murHrp = nil
+                for _, p in ipairs(game:GetService("Players"):GetPlayers()) do
+                    if p ~= plr and p.Character and getRole(p) == "Murderer" then
+                        local m = p.Character:FindFirstChild("HumanoidRootPart")
+                        local mh = p.Character:FindFirstChildOfClass("Humanoid")
+                        if m and mh and mh.Health > 0 then
+                            murHrp = m
+                            break
+                        end
+                    end
+                end
+                -- kierunek ucieczki: prosto OD mordercy, tylko poziomo
+                -- (schodzimy w bok, nie w podłogę/sufit)
+                local awayFromMur = nil
+                if murHrp then
+                    local a = hrp.Position - murHrp.Position
+                    a = Vector3.new(a.X, 0, a.Z)
+                    if a.Magnitude < 0.5 then
+                        a = hrp.CFrame.LookVector  -- stoimy na nim: uciekamy przed siebie
+                    end
+                    if a.Magnitude < farmAvoidDist then
+                        awayFromMur = a
+                    end
+                end
+
+                local nearestCoin, shortestDistance = nil, math.huge
+                for i = #coinCache, 1, -1 do
+                    local coin = coinCache[i]
+                    if not isCoinAlive(coin) then
+                        table.remove(coinCache, i)
+                    elseif not coinBlacklist[coin] then
+                        local dist = (hrp.Position - coin.Position).Magnitude
+                        -- pomijamy monety spoza zasięgu (np. na innej mapie)
+                        if dist <= FARM_TARGET_RANGE and dist < shortestDistance then
+                            shortestDistance = dist
+                            nearestCoin = coin
                         end
                     end
                 end
 
-                if nearestCoin and autoFarmCoins then
-                    if hum then hum.PlatformStand = true end
-                    for _, part in pairs(plr.Character:GetDescendants()) do
-                        if part:IsA("BasePart") then part.CanCollide = false end
+                if awayFromMur and (not hum or hum.Health > 0) then
+                    -- MORDERCA ZA BLISKO: TYLKO ucieczka, monety czekają.
+                    -- Prędkość farmy (max FARM_SAFE_SPEED_CAP=24) i tak wygrywa
+                    -- z chodem mordercy (~16), więc dystans się odbuduje.
+                    if hum then
+                        hum.PlatformStand = false
+                        hum.AutoRotate = false
                     end
                     hrp.Velocity = Vector3.new(0, 0, 0)
                     hrp.RotVelocity = Vector3.new(0, 0, 0)
 
-                    local distToCoin = (nearestCoin.Position - hrp.Position).Magnitude
-                    local travelTime = distToCoin / math.clamp(farmSpeed, 5, 25)
-                    local tweenInfo = TweenInfo.new(travelTime, Enum.EasingStyle.Linear)
-                    currentTween = tweenService:Create(hrp, tweenInfo, {CFrame = CFrame.new(nearestCoin.Position)})
-                    currentTween:Play()
-
-                    local completed = false
-                    local conn
-                    conn = currentTween.Completed:Connect(function()
-                        completed = true
-                        conn:Disconnect()
-                    end)
-
-                    while not completed and autoFarmCoins and nearestCoin.Parent and nearestCoin.Transparency < 1 do
-                        task.wait(0.05)
+                    local escGoal = hrp.Position + awayFromMur.Unit * (farmAvoidDist + 2)
+                    local escOffset = escGoal - hrp.Position
+                    if escOffset.Magnitude > 0.05 then
+                        local escSpeed = math.clamp(farmSpeed, 5, FARM_SAFE_SPEED_CAP)
+                        local escStep = math.min(escOffset.Magnitude, escSpeed * dt, FARM_MAX_STEP)
+                        hrp.CFrame = CFrame.new(hrp.Position + escOffset.Unit * escStep)
+                            * (hrp.CFrame - hrp.CFrame.Position)
                     end
-                    if currentTween then currentTween:Cancel() end
-                    task.wait(0.02)
+                elseif nearestCoin and (not hum or hum.Health > 0) then
+                    if hum then
+                        hum.PlatformStand = false
+                        hum.AutoRotate = false
+                    end
+
+                    -- ANTI-STUCK: dotarliśmy do monety i nic się nie dzieje →
+                    -- po FARM_STUCK_TIME czarna lista i lecimy do następnej
+                    if shortestDistance < 3 then
+                        if nearestCoin == farmStuckCoin then
+                            farmStuckClock = farmStuckClock + dt
+                        else
+                            farmStuckCoin, farmStuckClock = nearestCoin, 0
+                        end
+                        if farmStuckClock >= FARM_STUCK_TIME then
+                            coinBlacklist[nearestCoin] = now + FARM_BLACKLIST_TIME
+                            farmStuckCoin, farmStuckClock = nil, 0
+                        end
+                    else
+                        farmStuckCoin, farmStuckClock = nil, 0
+                    end
+
+                    hrp.Velocity = Vector3.new(0, 0, 0)
+                    hrp.RotVelocity = Vector3.new(0, 0, 0)
+
+                    -- cel: środek monety; gdy już jesteśmy w środku, jeździmy
+                    -- kółko wokół niej — Touched odpala się na POCZĄTKU
+                    -- kolizji, więc samo stanie w monety nie gwarantuje zbioru
+                    local goal = nearestCoin.Position
+                    if shortestDistance < 1.5 then
+                        local a = now * 8
+                        goal = nearestCoin.Position + Vector3.new(math.cos(a), 0, math.sin(a)) * 1.4
+                    end
+
+                    local offset = goal - hrp.Position
+                    local dist = offset.Magnitude
+                    if dist > 0.05 then
+                        -- ruch co klatkę: suwak przycięty do progu + twardy
+                        -- limit kroku, którego nie da się przekroczyć nawet po lagu
+                        local speed = math.clamp(farmSpeed, 5, FARM_SAFE_SPEED_CAP)
+                        local step = math.min(dist, speed * dt, FARM_MAX_STEP)
+                        local newPos = hrp.Position + offset.Unit * step
+                        local rot = hrp.CFrame - hrp.CFrame.Position
+                        hrp.CFrame = CFrame.new(newPos) * rot
+                    end
                 else
-                    if hum then hum.PlatformStand = false end
+                    if hum then hum.AutoRotate = true end
+                    farmStuckCoin, farmStuckClock = nil, 0
                 end
             end
         end
@@ -1617,6 +3429,193 @@ function startMainScript()
                 end
             end
         end
+    end)
+
+    ------------------------------------------------------------
+    -- AIMBOT MM2 (REWOLWER SZERYFA)
+    -- Sterowanie 1:1 jak aimbot w BloxStrike: suwak FOV, kółko FOV,
+    -- suwak prędkości i CELUJEMY NA PRZYTRZYMANYM PPM.
+    -- Warunki: PPM trzymany + broń szeryfa (Gun / Revolver / Pistol)
+    -- wzięta DO RĘKI — z nożem ani z pustymi rękami nic się nie dzieje.
+    -- Cel = Morderca, celowanie w CIAŁO (klatka/pas, nie głowa).
+    -- Kółko = GUI (UIStroke + UICorner), bo Drawing w Madium nie rysuje.
+    ------------------------------------------------------------
+    local mm2AimCtl = { dx = 0, yawSent = nil, sens = 0.004 }
+    -- isTargetValid() robi GetDescendants() na cale workspace — bez tego
+    -- bufora aimbot skanowalby mape 60x/s na kazdej klatce (jak kiedyś
+    -- auto-farm monet). Walidacja celu max 4x/s, kąt liczymy co klatkę.
+    local aimValidCache = {}
+
+    local fovGui2, fovFrame2, fovStroke2 = nil, nil, nil
+    pcall(function()
+        fovGui2 = Instance.new("ScreenGui")
+        fovGui2.Name = "MM2FovCircle"
+        fovGui2.ResetOnSpawn = false
+        fovGui2.IgnoreGuiInset = true
+        fovGui2.DisplayOrder = 99999
+        fovGui2.Parent = targetParent
+        fovFrame2 = Instance.new("Frame")
+        fovFrame2.Size = UDim2.fromOffset(200, 200)
+        fovFrame2.BackgroundTransparency = 1
+        fovFrame2.Visible = false
+        fovFrame2.Parent = fovGui2
+        fovStroke2 = Instance.new("UIStroke")
+        fovStroke2.Color = Color3.fromRGB(170, 50, 255)
+        fovStroke2.Thickness = 2
+        fovStroke2.Transparency = 0.15
+        fovStroke2.Parent = fovFrame2
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(1, 0)
+        corner.Parent = fovFrame2
+    end)
+
+    -- Zwraca narzędzie szeryfa tylko gdy jest WZIĘTE DO RĘKI
+    local function getEquippedRevolver()
+        local ch = plr.Character
+        if not ch then return nil end
+        local tool = ch:FindFirstChildOfClass("Tool")
+        if not tool then return nil end
+        local n = tool.Name:lower()
+        if n:find("gun") or n:find("revolver") or n:find("pistol") then
+            return tool
+        end
+        return nil
+    end
+
+    -- PPM tracking (BEZ gp — aimbot musi działać nawet gdy gra przetwarza input)
+    uis.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton2 then
+            mm2Ppm = true
+        end
+    end)
+
+    uis.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton2 then
+            mm2Ppm = false
+        end
+    end)
+
+    -- Kółko FOV + Aimbot — RenderStepped (PO kamerze gry)
+    runService.RenderStepped:Connect(function()
+        -- celuje dopiero przy PPM + rewolwer w ręce (jak BloxStrike)
+        local armed = aimbotEnabled and mm2Ppm and getEquippedRevolver() ~= nil
+
+        -- kółko FOV: widoczne gdy aimbot włączony, zielone gdy CELUJE,
+        -- fioletowe gdy tylko czeka (bez PPM albo bez rewolweru)
+        if fovFrame2 then
+            if aimbotEnabled then
+                local viewportSize = cam.ViewportSize
+                -- koło = prawdziwy stożek selekcji (tan), jak w BloxStrike
+                local fovDraw = math.min(aimbotFov, 85)
+                local tanHalf = math.tan(math.rad(math.max(cam.FieldOfView, 1) / 2))
+                local screenRadius = (viewportSize.Y / 2) * math.tan(math.rad(fovDraw)) / math.max(tanHalf, 1e-4)
+                screenRadius = math.clamp(screenRadius, 24, math.max(viewportSize.X, viewportSize.Y) / 2)
+                local d = math.floor(screenRadius * 2 + 0.5)
+                fovFrame2.Size = UDim2.fromOffset(d, d)
+                fovFrame2.Position = UDim2.fromOffset(
+                    math.floor(viewportSize.X / 2 - screenRadius + 0.5),
+                    math.floor(viewportSize.Y / 2 - screenRadius + 0.5))
+                fovFrame2.Visible = true
+                if fovStroke2 then
+                    fovStroke2.Color = armed and Color3.fromRGB(0, 255, 0) or Color3.fromRGB(170, 50, 255)
+                    fovStroke2.Enabled = true
+                end
+            else
+                fovFrame2.Visible = false
+                if fovStroke2 then fovStroke2.Enabled = false end
+            end
+        end
+
+        if not armed then return end
+        -- sam szeryf nie strzela do siebie; bez rewolweru nie ma czego celować
+        if getRole(plr) == "Murderer" then return end
+
+        local camPos = cam.CFrame.Position
+        local camDir = cam.CFrame.LookVector
+        local best, bestAngle = nil, math.min(aimbotFov, 85)
+        local now = tick()
+
+        for _, p in pairs(playersService:GetPlayers()) do
+            if p ~= plr and p.Character and getRole(p) == "Murderer" then
+                local ok
+                local cached = aimValidCache[p]
+                if cached and (now - cached.t) < 0.25 then
+                    ok = cached.ok
+                else
+                    ok = isTargetValid(p)
+                    aimValidCache[p] = { t = now, ok = ok }
+                end
+                if ok then
+                    -- Celowanie w CIAŁO: klatka/pas zamiast głowy
+                    -- (UpperTorso R15 > Torso R6 > HumanoidRootPart; Head tylko
+                    -- jako awaryjny punkt, gdyby korpusu nie było)
+                    for _, partName in ipairs({"UpperTorso", "Torso", "HumanoidRootPart", "Head"}) do
+                        local part = p.Character:FindFirstChild(partName)
+                        if part then
+                            local toTarget = part.Position - camPos
+                            local dist = toTarget.Magnitude
+                            if dist > 0 and dist < 800 then
+                                local ang = math.deg(math.acos(math.clamp(camDir:Dot(toTarget.Unit), -1, 1)))
+                                if ang < bestAngle then
+                                    bestAngle = ang
+                                    best = part.Position
+                                end
+                            end
+                            break
+                        end
+                    end
+                end
+            end
+        end
+
+        if not best then return end
+
+        -- STEROWANIE: symulacja ruchu myszy (adaptacja czułości co klatkę)
+        local dir = (best - camPos).Unit
+        local look = cam.CFrame.LookVector
+        local ang = math.acos(math.clamp(look:Dot(dir), -1, 1))
+        if ang > math.rad(0.3) and mousemoverel and (not iswindowactive or iswindowactive()) then
+            local yawNow = math.atan2(look.X, -look.Z)
+            if mm2AimCtl.yawSent ~= nil and mm2AimCtl.dx ~= 0 then
+                local dYaw = yawNow - mm2AimCtl.yawSent
+                while dYaw > math.pi do dYaw = dYaw - 2 * math.pi end
+                while dYaw < -math.pi do dYaw = dYaw + 2 * math.pi end
+                local s = math.abs(dYaw) / math.abs(mm2AimCtl.dx)
+                if s > 0.0002 and s < 0.05 then
+                    mm2AimCtl.sens = mm2AimCtl.sens * 0.6 + s * 0.4
+                end
+            end
+            mm2AimCtl.yawSent = yawNow
+            local yawErr, pitchErr = 0, 0
+            local flatLook = Vector3.new(look.X, 0, look.Z)
+            local flatDir = Vector3.new(dir.X, 0, dir.Z)
+            if flatLook.Magnitude > 1e-4 and flatDir.Magnitude > 1e-4 then
+                flatLook = flatLook.Unit
+                flatDir = flatDir.Unit
+                yawErr = math.atan2(flatDir:Cross(flatLook).Y, flatLook:Dot(flatDir))
+            end
+            -- pion względem OSI kamery (nie horyzontu) — inaczej znak się odwraca
+            pitchErr = math.asin(math.clamp(dir:Dot(cam.CFrame.UpVector), -1, 1))
+            local k = 0.15 + (math.clamp(aimbotSpeed, 1, 125) - 1) / 124 * 0.8
+            local degPerPx = math.max(mm2AimCtl.sens * (180 / math.pi), 1e-5)
+            local dx = math.clamp(math.floor(math.deg(yawErr) * k / degPerPx + 0.5), -500, 500)
+            local dy = math.clamp(math.floor(-math.deg(pitchErr) * k / degPerPx + 0.5), -500, 500)
+            mm2AimCtl.dx = dx
+            if dx ~= 0 or dy ~= 0 then
+                pcall(mousemoverel, dx, dy)
+            end
+        elseif not mousemoverel then
+            -- fallback gdy brak mousemoverel: obrót samej kamery
+            local goal = CFrame.new(camPos, best)
+            cam.CFrame = cam.CFrame:Lerp(goal, math.clamp(0.15 + aimbotSpeed / 125 * 0.8, 0.15, 0.95))
+        end
+    end)
+
+    bAim.MouseButton1Click:Connect(function()
+        aimbotEnabled = not aimbotEnabled
+        bAim.Text = aimbotEnabled and "Aimbot (Rewolwer): ON" or "Aimbot (Rewolwer): OFF"
+        bAim.BackgroundColor3 = aimbotEnabled and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
+        updateActiveCheatsList()
     end)
 
     local originalPos = nil
@@ -1883,7 +3882,14 @@ function startBloxStrikeScript()
             if ok and v ~= nil and tostring(v) ~= "" then return "attr:Team=" .. tostring(v) end
         end,
         function(p) -- inne warianty nazw atrybutów na graczu
-            for _, key in ipairs({"TeamName", "team", "TeamId", "Side", "Faction"}) do
+            -- Po updacie gry lista kluczy teamu potrafi się zmienić —
+            -- trzymamy szeroki zestaw wariantów (zakładka: atrybut = team).
+            for _, key in ipairs({
+                "TeamName", "team", "TeamId", "Side", "Faction",
+                "Role", "TeamRole", "TeamNum", "TeamIndex", "TeamString",
+                "PlayerTeam", "Squad", "Alliance", "TeamColor",
+                "IsCT", "IsTerrorist", "CT", "T",
+            }) do
                 local ok, v = pcall(function() return p:GetAttribute(key) end)
                 if ok and v ~= nil and tostring(v) ~= "" then return "attr:" .. key .. "=" .. tostring(v) end
             end
@@ -1891,7 +3897,7 @@ function startBloxStrikeScript()
         function(p) -- atrybuty na POSTACI (gra mogła przenosić team przy spawnie)
             local ch = p.Character
             if ch then
-                for _, key in ipairs({"Team", "TeamName", "team", "Side"}) do
+                for _, key in ipairs({"Team", "TeamName", "team", "Side", "Role", "TeamId", "Faction", "TeamIndex"}) do
                     local ok, v = pcall(function() return ch:GetAttribute(key) end)
                     if ok and v ~= nil and tostring(v) ~= "" then return "cattr:" .. key .. "=" .. tostring(v) end
                 end
@@ -1909,12 +3915,62 @@ function startBloxStrikeScript()
                 if ct and isInTeamFolder(p, ct) then return "Counter-Terrorists" end
             end
         end,
+        function(p) -- leaderstats (klasyczne gry trzymają team w wartościach)
+            local ok, ls = pcall(function() return p:FindFirstChild("leaderstats") end)
+            if ok and ls then
+                for _, key in ipairs({"Team", "TeamName", "team", "Role", "Side", "Faction"}) do
+                    local v = ls:FindFirstChild(key)
+                    if v and v.Value ~= nil and tostring(v.Value) ~= "" then
+                        return "ls:" .. key .. "=" .. tostring(v.Value)
+                    end
+                end
+            end
+        end,
+        -- SIEC RATUNKOWA PO UPCIE: gra zmieniła NAZWĘ klucza teamu, ale
+        -- wartości dalej wyglądają po CS-owemu (T/CT/Terrorists/Red/Blue).
+        -- Skanujemy atrybuty gracza i postaci i dopasowujemy po WARTOŚCI,
+        -- nie po kluczu — dzięki temu nie złapiemy przypadkiem "Kills"/
+        -- "Score" (też się różnią między graczami!) i celowanie dalej
+        -- wie, kto jest wróg. Ostatnie źródło w kolejce.
+        function(p)
+            local function classify(v)
+                if type(v) ~= "string" then return nil end
+                local s = v:lower():gsub("^%s+", ""):gsub("%s+$", "")
+                if s == "t" or s:find("terror", 1, true) then return "Terrorists" end
+                if s == "ct" or s:find("counter", 1, true) then return "Counter-Terrorists" end
+                if s == "red" or s == "redteam" or s:find("allies", 1, true) then return "Red" end
+                if s == "blue" or s == "blueteam" or s:find("axis", 1, true) then return "Blue" end
+                return nil
+            end
+            local okA, attrs = pcall(function() return p:GetAttributes() end)
+            if okA and type(attrs) == "table" then
+                for k, v in pairs(attrs) do
+                    local c = classify(v)
+                    if c then return "auto:" .. tostring(k) .. "=" .. c end
+                end
+            end
+            local okC, ch = pcall(function() return p.Character end)
+            if okC and ch then
+                local okCA, cattrs = pcall(function() return ch:GetAttributes() end)
+                if okCA and type(cattrs) == "table" then
+                    for k, v in pairs(cattrs) do
+                        local c = classify(v)
+                        if c then return "cauto:" .. tostring(k) .. "=" .. c end
+                    end
+                end
+            end
+        end,
     }
 
     -- src = wybrane źródło (funkcja), nil = nieustalone, false = brak sensownego
     local chosenSource = nil
     local lastSourceScan = 0
     local warnedNoTeam = false
+    -- Ostatnio znany team PER GRACZ: gdy źródło chwilowo nie działa
+    -- (Intermission — gra kasuje atrybuty między rundami), ESP i celowanie
+    -- jadą dalej na ostatnim znanym podziale zamiast gasnąć do zera.
+    -- Świeże wartości ze źródła nadpisują cache (rewalidacja co 2s).
+    local lastKnownTeams = {}
 
     local function resolveTeamSource()
         local now = tick()
@@ -1960,7 +4016,10 @@ function startBloxStrikeScript()
                 return src
             end
         end
-        if not warnedNoTeam then
+        -- Alarm tylko gdy NIGDY nie znaliśmy teamów (prawdziwy deadlock).
+        -- Chwilowa utrata źródła z zapełnionym cache = systemy jadą na
+        -- lastKnownTeams — bez fałszywego „celowanie wstrzymane".
+        if not warnedNoTeam and next(lastKnownTeams) == nil then
             warnedNoTeam = true
             warn("[SzpontHub] BS: brak źródła teamu różniącego graczy — celowanie (expand/silent/aimbot/trigger) wstrzymane, dopóki teamy nie wrócą")
         end
@@ -1970,10 +4029,19 @@ function startBloxStrikeScript()
     local function getTeamOf(player)
         if not player then return nil end
         local src = resolveTeamSource()
-        if not src then return nil end
-        local ok, v = pcall(src, player)
-        if ok then return v end
-        return nil
+        if src then
+            local ok, v = pcall(src, player)
+            if ok and v ~= nil then
+                lastKnownTeams[player] = v
+                return v
+            end
+        end
+        -- Brak źródła ALBO brak wartości u tego gracza (kasuje się po
+        -- śmierci/Intermission) → ostatnio znany team zamiast nil. Dzięki
+        -- temu isEnemy/isTeammate nie wygasają między rundami (stary błąd:
+        -- źródło spadło do zera → ESP pokazywał zero wrogów, celowanie
+        -- wstrzymane mimo żyjących postaci).
+        return lastKnownTeams[player]
     end
 
     -- Cache teamu gracza (odświeża się co 0.5s żeby nie obciążać)
@@ -2022,24 +4090,30 @@ function startBloxStrikeScript()
     end
 
     -- BloxStrike nie używa Humanoida — życie to atrybuty Health/Dead (postaci i gracza)
+    -- Druga wartość zwracana = POWÓD odrzucenia (tylko do diagnostyki ESP;
+    -- istniejący kod celowania ignoruje dodatkowy return bez zmian).
     local function isAliveTarget(player, char)
         -- TRUPY: Dead bywa true / 1 / "true" i siedzi na graczu ALBO na postaci
         local d1 = player:GetAttribute("Dead") or char:GetAttribute("Dead")
         local d2 = player:GetAttribute("IsDead") or char:GetAttribute("IsDead")
         if d1 == true or d1 == 1 or d1 == "true" or d2 == true or d2 == 1 or d2 == "true" then
-            return false
+            return false, "Dead/IsDead=" .. tostring(d1) .. "/" .. tostring(d2)
         end
         -- Humanoid: śmierć klasyczna (gdy gra go używa)
         local hum = char:FindFirstChildOfClass("Humanoid")
         if hum then
-            if hum.Health <= 0 then return false end
-            if hum:GetState() == Enum.HumanoidStateType.Dead then return false end
+            if hum.Health <= 0 then return false, "Humanoid.Health=" .. tostring(hum.Health) end
+            if hum:GetState() == Enum.HumanoidStateType.Dead then return false, "HumanoidState=Dead" end
         end
         -- Źródło prawdy BS = atrybut Health (postaci, a gdy brak — gracza)
         local hp = tonumber(char:GetAttribute("Health"))
-        if hp == nil then hp = tonumber(player:GetAttribute("Health")) end
-        if hp ~= nil and hp <= 0 then return false end
-        return true
+        local hpSrc = "char.Health"
+        if hp == nil then
+            hp = tonumber(player:GetAttribute("Health"))
+            hpSrc = "player.Health"
+        end
+        if hp ~= nil and hp <= 0 then return false, hpSrc .. "=" .. tostring(hp) end
+        return true, nil
     end
 
     -- SYSTEM MOTYWÓW (THEMES)
@@ -2366,6 +4440,9 @@ function startBloxStrikeScript()
         if _G.__liptonSilentAim then table.insert(activeList, "• Silent Aim") end
         if _G.__liptonWallbang then table.insert(activeList, "• Wallbang") end
         if _G.__liptonTPShot then table.insert(activeList, "• TP Shot") end
+        if _G.__liptonAutoKnife then table.insert(activeList, "• Auto Knife") end
+        if _G.__liptonAutoRevolver then table.insert(activeList, "• Auto Revolver") end
+        if _G.__liptonDoubleTap then table.insert(activeList, "• Double Tap") end
         if noRecoil then table.insert(activeList, "• No Recoil") end
         if noSpread then table.insert(activeList, "• No Spread") end
         if hitboxExpander then table.insert(activeList, "• Hitbox (" .. hitboxSize .. ")") end
@@ -3003,20 +5080,65 @@ function startBloxStrikeScript()
         end
     end)
 
-    -- Cel pod krzyżem: żywy wróg na linii wzroku
+    -- Cel pod krzyżem: żywy wróg na linii wzroku.
+    -- PRZEZ DYM/OGIEŃ: gra puszcza pociski grupą kolizji "Bullet"
+    -- (Shared.Raycast), a nasz goły raycast łapał party efektów —
+    -- InnerFire/OuterFire z GrenadeParticles mają CanQuery=true (skan
+    -- live), więc trigger milczał w ogniu molotowa. Fix: promień tą
+    -- samą grupą "Bullet" + pętla przepuszczająca efekty granatów
+    -- (nazwy Smoke/InnerFire/OuterFire/Molotov..., przodkowie
+    -- GrenadeParticles, oraz półprzezroczyste/niekolidujące) aż do
+    -- postaci albo realnej ściany.
+    local function passableFx(inst)
+        if not inst:IsA("BasePart") then return false end
+        local n = (inst.Name or ""):lower()
+        if n == "fire" or n == "innerfire" or n == "outerfire"
+            or n:find("smoke", 1, true) or n:find("molotov", 1, true)
+            or n:find("inferno", 1, true) or n:find("flame", 1, true)
+            or n:find("cloud", 1, true) then
+            return true
+        end
+        -- przodek = kontener efektów (live part bywa nazwany "Part");
+        -- bez gołego "fire" w przodkach, bo model gracza = jego nick.
+        local a = inst.Parent
+        for _ = 1, 3 do
+            if not a then break end
+            local an = (a.Name or ""):lower()
+            if an:find("grenadeparticles", 1, true) or an:find("smoke", 1, true)
+                or an:find("molotov", 1, true) or an:find("inferno", 1, true) then
+                return true
+            end
+            a = a.Parent
+        end
+        return (not inst.CanCollide) or inst.Transparency >= 0.5
+    end
+
     local function crosshairEnemy()
         local ray = cam:ViewportPointToRay(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
         local params = RaycastParams.new()
         params.FilterDescendantsInstances = {plr.Character}
         params.FilterType = Enum.RaycastFilterType.Exclude
-        local result = workspace:Raycast(ray.Origin, ray.Direction * 1000, params)
-        if result and result.Instance then
-            local hitChar = result.Instance:FindFirstAncestorOfClass("Model")
-            if hitChar then
-                local target = playersService:GetPlayerFromCharacter(hitChar)
-                if target and target ~= plr and isEnemy(target) and isAliveTarget(target, hitChar) then
+        params.CollisionGroup = "Bullet"
+        local org = ray.Origin
+        local dir = ray.Direction * 1000
+        local result = workspace:Raycast(org, dir, params)
+        local guard = 0
+        while result and guard < 8 do
+            local inst = result.Instance
+            local hitChar = inst:FindFirstAncestorOfClass("Model")
+            local target = hitChar and playersService:GetPlayerFromCharacter(hitChar)
+            if target then
+                if target ~= plr and isEnemy(target) and isAliveTarget(target, hitChar) then
                     return true
                 end
+                return false
+            end
+            if passableFx(inst) then
+                params:AddToFilter(inst)
+                result = workspace:Raycast(org, dir, params)
+                guard = guard + 1
+            else
+                return false
             end
         end
         return false
@@ -3062,6 +5184,24 @@ function startBloxStrikeScript()
     -- przy starcie weryfikujemy env; gdyby setfenv nie dzialal — nie
     -- instalujemy nic (zero ryzyka dla gry).
     local G = _G
+    -- TRZY NIEZALEZNE SILENT AIMY: każdy przełącznik działa samodzielnie
+    -- (bez wymuszania Silent Aima → Wallbang → TP Shot po kolei),
+    -- kombinacje dalej się składają. silentAny = czy maszyna ma działać
+    -- (redirect + autofire + blinki + nóż + revolver + double tap);
+    -- throughWalls = czy wolno wybierać cel ZA zasłoną (Wallbang / TP Shot /
+    -- Auto Knife — sam Silent Aim celuje tylko w widocznych, jak dotychczas;
+    -- Double Tap bez innych flag też tylko w widocznych).
+    local function silentAny()
+        return G.__liptonSilentAim or G.__liptonWallbang or G.__liptonTPShot or G.__liptonAutoKnife or G.__liptonAutoRevolver or G.__liptonDoubleTap
+    end
+    local function throughWalls()
+        return G.__liptonWallbang or G.__liptonTPShot or G.__liptonAutoKnife
+    end
+    -- DOUBLE TRAP: wymuszony cel drugiego strzału — ustawiany tuż przed
+    -- drugim fireWeapon (tryb Double Tap), odczytywany przez doRedirect
+    -- zamiast jego własnego wyboru najbliższego celu, czyszczony po strzale.
+    -- Deklaracja PRZED doRedirect, bo wrapper ma pusty env (tylko upvalue).
+    local redirectTarget, redirectAim = nil, nil
     local pcall_ = pcall
     local ipairs_ = ipairs
     local insertT = table.insert
@@ -3090,7 +5230,8 @@ function startBloxStrikeScript()
         updateActiveCheatsList()
     end)
 
-    -- WALLBANG (modyfikator Silent Aim): cel zza KAZDEJ zaslony tez dopuszczony,
+    -- WALLBANG (osobny silent aim — bez wymagania Silent Aima): cel zza
+    -- KAZDEJ zaslony tez dopuszczony,
     -- a budzet penetracji wymuszony na1e9 — w v_u_40 gry warunek stopu to
     -- `nagromadzona grubosc > próg_materialu + budzet`, wiec1e9 nigdy nie
     -- zostanie przekroczony i petla castThrough przechodzi przez sciane
@@ -3110,18 +5251,78 @@ function startBloxStrikeScript()
         updateActiveCheatsList()
     end)
 
-    -- TP SHOT — wymaga Silent Aim + Wallbang (bez Wallbang cel zza zasłony
-    -- nigdy nie jest wybierany, więc blink nie występuje). Dla celu zza
-    -- zasłony: blink obok ofiary → strzał w głowę z bliska (pełny dmg,
-    -- zawsze head — bez wallbangowego mnożnika0.75) → powrót. Okno ~0.1 s
-    -- — niewidoczność dla innych NIE jest gwarantowana (replikacja
-    -- ~20-60 Hz), serwer może tez zkickać za skok pozycji — testuj.
+    -- TP SHOT — osobny silent aim (nie wymaga Silent Aima ani Wallbang):
+    -- cel zza zasłony wybierany dzięki throughWalls, blink obok ofiary →
+    -- strzał w głowę z bliska (pełny dmg, zawsze head — bez wallbangowego
+    -- mnożnika0.75) → powrót. Okno ~0.1 s — niewidoczność dla innych NIE
+    -- jest gwarantowana (replikacja ~20-60 Hz), serwer może też zkickać
+    -- za skok pozycji — testuj.
     local bTP = createButton("TP Shot: OFF", 12, "RageBot")
     bTP.MouseButton1Click:Connect(function()
         local on = not G.__liptonTPShot
         G.__liptonTPShot = on
         bTP.Text = on and "TP Shot: ON" or "TP Shot: OFF"
         bTP.BackgroundColor3 = on and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
+        updateActiveCheatsList()
+    end)
+
+    -- AUTO KNIFE — blink za plecy + PPM (heavy → BackStab). Włączenie =
+    -- natychmiastowy equip noża (slot "Melee"; InvCtl jest tu jeszcze
+    -- nieuchwytne jako local, więc require — cache i tak zwraca ten sam
+    -- singleton). Cel zza ścian wybierany dzięki throughWalls — sam Auto
+    -- Knife wystarcza (bez Wallbang). Wyłączenie = broń zostaje jak stoi.
+    local bAK = createButton("Auto Knife: OFF", 14, "RageBot")
+    bAK.MouseButton1Click:Connect(function()
+        local on = not G.__liptonAutoKnife
+        G.__liptonAutoKnife = on
+        bAK.Text = on and "Auto Knife: ON" or "Auto Knife: OFF"
+        bAK.BackgroundColor3 = on and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
+        if on then
+            pcall(function()
+                local Inv = require(game:GetService("ReplicatedStorage").Controllers.InventoryController)
+                local inv = Inv.getCurrentInventory()
+                local slotT = inv and inv.Melee
+                local items = slotT and slotT._items
+                local idx = 1
+                if items then
+                    for k in pairs(items) do idx = k break end
+                end
+                Inv.equip("Melee", idx)
+            end)
+        end
+        updateActiveCheatsList()
+    end)
+
+    -- AUTO REVOLVER — po prostu silent aim, ale strzela WYŁĄCZNIE z
+    -- revolverem w ręku (ShootingOptions == "Revolver" = R8) i wyłącznie
+    -- przez PPM gry: LPM = startRevolverCharge (ładowanie młotka, nie to),
+    -- PPM = startRevolverSecondaryFire (szybki strzał — tak strzela się
+    -- revolverem). Bez innej flagi silent aima nie strzelamy z innych
+    -- broni (tryb tylko-revolver); z Silent Aim/Wallbang/TP Shot działa
+    -- też zwykły fireWeapon. Bez auto-equipu — R8 musi być w dłoni.
+    local bAR = createButton("Auto Revolver: OFF", 15, "RageBot")
+    bAR.MouseButton1Click:Connect(function()
+        local on = not G.__liptonAutoRevolver
+        G.__liptonAutoRevolver = on
+        bAR.Text = on and "Auto Revolver: ON" or "Auto Revolver: OFF"
+        bAR.BackgroundColor3 = on and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
+        updateActiveCheatsList()
+    end)
+
+    -- DOUBLE TRAP — drugi strzał w tej samej aktywacji, POZA COOLDOOWNEM
+    -- broni (bez czekania na FireRate) — para wychodzi w jednej klatce.
+    -- Cel drugiego strzału: NAJPIERW drugi wystający wróg (przy dwóch
+    -- wychylonych — po kuli na każdego); gdy nikogo drugiego nie ma —
+    -- powtórka w pierwszy cel (dobicie po pudle / strzale obok). Nikogo
+    -- wystającego = strzał nie wychodzi (zero ślepego ognia).
+    -- Działa w ścieżce LPM (SA/WB/DT solo); R8+Auto Revolver dostaje
+    -- własną parę PPM (revolverDouble), blinki TP mają własną dawkę.
+    local bDT = createButton("Double Tap: OFF", 16, "RageBot")
+    bDT.MouseButton1Click:Connect(function()
+        local on = not G.__liptonDoubleTap
+        G.__liptonDoubleTap = on
+        bDT.Text = on and "Double Tap: ON" or "Double Tap: OFF"
+        bDT.BackgroundColor3 = on and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
         updateActiveCheatsList()
     end)
 
@@ -3198,12 +5399,16 @@ function startBloxStrikeScript()
     end
 
     -- Zwraca czesc do ktorej ma poleciec pocisk albo nil
-    local function findSilentTarget(origin, ignoreList, maxDist)
+    -- onlyChar / skipChar: Double Tap pyta dwa razy — "czy ktoś INNY
+    -- wystaje?" (skipChar = pomijamy pierwszy cel) oraz "czy A jeszcze
+    -- wystaje?" (onlyChar = tylko pierwszy cel). Reszta faz (wallbang /
+    -- widoczność) bez zmian.
+    local function findSilentTarget(origin, ignoreList, maxDist, onlyChar, skipChar)
         local enemies = {}
         for _, p in ipairs_(Players_svc:GetPlayers()) do
             if p ~= plr and isEnemy(p) then
                 local ch = p.Character
-                if ch and isAliveTarget(p, ch) then
+                if ch and (onlyChar == nil or ch == onlyChar) and (skipChar == nil or ch ~= skipChar) and isAliveTarget(p, ch) then
                     local hrp = ch:FindFirstChild("HumanoidRootPart")
                     if hrp then
                         local d = (hrp.Position - origin).Magnitude
@@ -3225,11 +5430,12 @@ function startBloxStrikeScript()
             end
         end
         sortT(enemies, function(a, b) return a[2] < b[2] end)
-        -- WALLBANG: cel zza zaslonia tez dozwolony — bierzemy najblizszego
-        -- wroga z glowa (srodek glowy; priorytet jak w Fazie1) albo tors.
-        -- ZADNYCH testow widocznosci (headAimPoint/clearOfWalls) — promien
-        -- ma przejsc przez sciane. Filtry isEnemy/isAliveTarget zostaja.
-        if G.__liptonWallbang then
+        -- WALLBANG / TP SHOT / AUTO KNIFE: cel zza zaslonia tez dozwolony —
+        -- bierzemy najblizszego wroga z glowa (srodek glowy; priorytet jak
+        -- w Fazie1) albo tors. ZADNYCH testow widocznosci (headAimPoint/
+        -- clearOfWalls) — promien ma przejsc przez sciane. Filtry
+        -- isEnemy/isAliveTarget zostaja. Sam Silent Aim = tylko widoczni.
+        if throughWalls() then
             for _, e in ipairs_(enemies) do
                 if e[3] then
                     return e[3], e[3].Position
@@ -3282,7 +5488,14 @@ function startBloxStrikeScript()
         local range = pr.Range or 500
         G.__liptonLastRange = range
         local ignoreList = GetRayIgnore()
-        local part, aim = findSilentTarget(origin, ignoreList, range)
+        local part, aim
+        if redirectTarget then
+            -- DOUBLE TRAP: wymuszony cel drugiego strzału (powtórka w A
+            -- albo B, gdy A padł) — bez przelosowania na najbliższego.
+            part, aim = redirectTarget, redirectAim
+        else
+            part, aim = findSilentTarget(origin, ignoreList, range)
+        end
         if not part then
             return
         end
@@ -3361,7 +5574,7 @@ function startBloxStrikeScript()
         local origCreate = BulletClass.create
         local wrapper = function(wself, ao, ia)
             local b = origCreate(wself, ao, ia)
-            if b and G.__liptonSilentAim then
+            if b and silentAny() then
                 pcall_(doRedirect, wself, b)
             end
             return b
@@ -3372,7 +5585,9 @@ function startBloxStrikeScript()
             setfenv(findSilentTarget, {})
             setfenv(partExposed, {})
             setfenv(headAimPoint, {})
-            for _, f in ipairs({wrapper, doRedirect, findSilentTarget, partExposed, headAimPoint}) do
+            setfenv(silentAny, {})
+            setfenv(throughWalls, {})
+            for _, f in ipairs({wrapper, doRedirect, findSilentTarget, partExposed, headAimPoint, silentAny, throughWalls}) do
                 local e = getfenv(f)
                 if e.getgenv or e.hookfunction then
                     error("dirty env")
@@ -3629,13 +5844,28 @@ function startBloxStrikeScript()
     local taskWait = task.wait
     local cfLookAt = CFrame.lookAt
     local v3new = Vector3.new
+    local tonumber_ = tonumber
+    local tostring_ = tostring
     local tpBusy = false
+    -- Statystyki blinku (odczyt: _G.__liptonTPStat) — mierzą, czy blink
+    -- w ogóle odpala i gdzie ewentualnie staje (err = ostatni powód).
+    local tpStat = { try = 0, vis = 0, blink = 0, ok = 0, fail = 0, shots = 0, err = "" }
+    G.__liptonTPStat = tpStat
+    -- Statystyka Auto Revolvera (odczyt: _G.__liptonRevStat) + stałe
+    -- przechwycone jako local-e: revolverShot dostaje pusty env przez
+    -- setfenv, więc Enum/Vector2 muszą być upvalue, nie globaly.
+    local revStat = { shot = 0, err = "" }
+    G.__liptonRevStat = revStat
+    local lastRevShot = 0
+    local utMouseButton2 = Enum.UserInputType.MouseButton2
+    local v2new = Vector2.new
     local function tpShotBlink(part, w)
-        if tpBusy then return false end
+        tpStat.blink = tpStat.blink + 1
+        if tpBusy then tpStat.err = "busy" return false end
         local ch = plr.Character
-        if not ch or ch:GetAttribute("Dead") then return false end
+        if not ch or ch:GetAttribute("Dead") then tpStat.err = "dead" return false end
         local hrp = ch:FindFirstChild("HumanoidRootPart")
-        if not hrp then return false end
+        if not hrp then tpStat.err = "nohrp" return false end
         local saved = hrp.CFrame
         local tpos = part.Position
         -- Kotwica = tors ofiary (stoimy na podłożu obok niej, nie na
@@ -3651,24 +5881,335 @@ function startBloxStrikeScript()
         h = h.Unit
         local dest = anchor + h * 3
         tpBusy = true
-        local ok = pcall_(function()
+        local ok, err = pcall_(function()
             hrp.CFrame = cfLookAt(dest, tpos)
             taskWait(0.05)
             local cam = ws.CurrentCamera
             if cam then cam.CFrame = cfLookAt(dest, tpos) end
             fireWeapon(w)
+            tpStat.shots = tpStat.shots + 1
+            -- DRUGA DAWKA w kadencji broni (Negev FireRate =0.075 s):
+            -- head115 z hełmem (ArmorPen0.75 → ~86) NIE zabija z jednego
+            -- strzału — drugi head w oknie blinku = gwarancja oneshota.
+            -- Wolne bronie (interwał >0.12 s, np. AWP) pomijamy — ich head
+            -- i tak zabija, a czekanie rozciągnęłoby okno blinku. Interwał
+            -- ≥ FireRate = ta sama kadencja co przy strzale z ręki, więc
+            -- serwer nie widzi przyspieszonego ognia.
+            local fr = 0.075
+            pcall_(function() fr = tonumber_(w.Properties.FireRate) or fr end)
+            if fr + 0.01 <= 0.12 then
+                taskWait(fr + 0.01)
+                if cam then cam.CFrame = cfLookAt(dest, tpos) end
+                fireWeapon(w)
+                tpStat.shots = tpStat.shots + 1
+            end
             taskWait(0.05)
         end)
         pcall_(function()
             hrp.CFrame = saved
         end)
         tpBusy = false
+        if ok then
+            tpStat.ok = tpStat.ok + 1
+        else
+            tpStat.fail = tpStat.fail + 1
+            tpStat.err = tostring_(err)
+        end
         return ok
+    end
+
+    -- AUTO KNIFE — wymuszone wyposażenie noża: equip(slot, index) gra
+    -- sama wysyła WeaponEquipped do serwera. Indeks loadoutu noża = pierwszy
+    -- klucz slotu "Melee" (domyślnie1); przy problemie trigger powtórzy
+    -- (self-heal). pairs_ jako local, bo helper ma puste środowisko.
+    local pairs_ = pairs
+    local function equipKnife()
+        pcall_(function()
+            local inv = InvCtl.getCurrentInventory()
+            local slotT = inv and inv.Melee
+            local items = slotT and slotT._items
+            local idx = 1
+            if items then
+                for k in pairs_(items) do
+                    idx = k
+                    break
+                end
+            end
+            InvCtl.equip("Melee", idx)
+        end)
+    end
+
+    -- AUTO KNIFE v2 — BLINK ZA PLECY + PPM (heavy). Gra robi dokładnie
+    -- to, co przy trzymanym PPM: Melee:shoot(true) → "Heavy Swing", a kąt
+    -- >100° za plecami ofiary (test v_u_24) → "BackStab" = serwerowe
+    -- one-shot. Dest = ofiara minus jej LookVector ×2.5 (Range noża =3 →
+    -- ray z kamery trafia w plecy, kąt wychodzi 180°). v2: hold0.2 s
+    -- przed ciosem — serwer waliduje kąt/dystans po SWOJEJ kopii naszej
+    -- pozycji, więc pozycja musi zdążyć się zreplikować (0.05 s było za
+    -- mało: pakiet leciał, serwer widział nas jeszcze z daleka →
+    -- odrzucenie = "nawala ale nie robi nic"). CFrame postaci i kamery
+    -- wymuszany PONOWNIE tuż przed rayem (lokalny MovementV2 potrafi
+    -- nadpisać pozycję w trakcie holdu). Diagnostyka: kray = kopia
+    -- promienia Melea (trafienie = warunek MeleeAttack.Send — bez niego
+    -- animacja leci, a pakiet nie wychodzi), khp = HP ofiary przed → po
+    -- (odczytywane przy kolejnym ciosie, bo hp wraca z serwera z
+    -- opóźnieniem; >-1 = model zniknął = zwykle zabójstwo).
+    local RaycastParams_ = RaycastParams
+    local kLastV, kLastHp = nil, nil
+    local function knifeBlink(part, w, ignore)
+        tpStat.blink = tpStat.blink + 1
+        if kLastV and kLastHp ~= nil then
+            local hum0 = kLastV:FindFirstChildOfClass("Humanoid")
+            tpStat.khp = tostring_(kLastHp) .. ">" .. tostring_(hum0 and hum0.Health or -1)
+            kLastV, kLastHp = nil, nil
+        end
+        if tpBusy then tpStat.err = "busy" return false end
+        local ch = plr.Character
+        if not ch or ch:GetAttribute("Dead") then tpStat.err = "dead" return false end
+        local hrp = ch:FindFirstChild("HumanoidRootPart")
+        if not hrp then tpStat.err = "nohrp" return false end
+        local vch = part:FindFirstAncestorWhichIsA("Model")
+        local vroot = vch and vch:FindFirstChild("HumanoidRootPart")
+        if not vroot then tpStat.err = "novictimroot" return false end
+        local saved = hrp.CFrame
+        local aim = vroot.Position
+        local behind = aim - vroot.CFrame.LookVector * 2.5
+        tpBusy = true
+        local ok, err = pcall_(function()
+            hrp.CFrame = cfLookAt(behind, aim)
+            taskWait(0.2)
+            hrp.CFrame = cfLookAt(behind, aim)
+            local cam = ws.CurrentCamera
+            if cam then cam.CFrame = cfLookAt(behind, aim) end
+            local rng = 3
+            pcall_(function() rng = tonumber_(w.Properties.Range) or rng end)
+            if cam and ignore then
+                local rp = RaycastParams_.new()
+                rp.FilterDescendantsInstances = ignore
+                local r = ws:Raycast(cam.CFrame.Position, cam.CFrame.LookVector * rng, rp)
+                if r then
+                    tpStat.kray = r.Instance.Name .. "/" .. (r.Instance.Parent and r.Instance.Parent.Name or "?")
+                else
+                    tpStat.kray = "MISS"
+                end
+            else
+                tpStat.kray = "nocam"
+            end
+            local hum = vch:FindFirstChildOfClass("Humanoid")
+            kLastV, kLastHp = vch, (hum and hum.Health or -1)
+            w:shoot(true)
+            tpStat.shots = tpStat.shots + 1
+            taskWait(0.15)
+        end)
+        pcall_(function()
+            hrp.CFrame = saved
+        end)
+        tpBusy = false
+        if ok then
+            tpStat.ok = tpStat.ok + 1
+        else
+            tpStat.fail = tpStat.fail + 1
+            tpStat.err = tostring_(err)
+        end
+        return ok
+    end
+
+    -- AUTO REVOLVER — strzał ścieżką PPM gry: akcja Secondary Fire woła
+    -- v6:startRevolverSecondaryFire(getInputBinding(u4)) — dla prawego
+    -- klawisza binding = Enum.UserInputType.MouseButton2, więc tu to samo
+    -- wywołanie wprost (bez symulacji wejścia, bez okna). Własny cooldown
+    -- = FireRate broni + pominięcie gdy trwa strzał — bez spamu stanu R8.
+    -- Fallback: naturalny klik PPM przez VirtualUser (wzorzec triggerbota,
+    -- tylko Button2), gdyby metoda nie istniała.
+    local function revolverShot(w, pr)
+        local now = tick_()
+        local cd = tonumber_(pr and pr.FireRate) or 0.706
+        if now - lastRevShot < cd then
+            revStat.err = "cd"
+            return false
+        end
+        if w.IsShooting then
+            revStat.err = "shooting"
+            return false
+        end
+        if w.IsReloading then
+            revStat.err = "reload"
+            return false
+        end
+        lastRevShot = now
+        local ok, err = pcall_(w.startRevolverSecondaryFire, w, utMouseButton2)
+        if ok then
+            -- Strzał dzieje się synchronicznie w start (shoot("Secondary"));
+            -- stop = druga połowa tapa PPM jak przy realnym kliknięciu
+            -- (czyszczenie IsAlternativeFireHeld/Binding — gra i tak by to
+            -- zrobiła przy braku fizycznego trzymania PPM, ale bezpieczniej).
+            pcall_(w.stopRevolverSecondaryFire, w)
+            revStat.shot = revStat.shot + 1
+            revStat.err = ""
+            return true
+        end
+        revStat.err = "direct:" .. tostring_(err)
+        local ok2, err2 = pcall_(function()
+            vu:CaptureController()
+            local c = ws.CurrentCamera or cam
+            vu:ClickButton2(v2new(c.ViewportSize.X / 2, c.ViewportSize.Y / 2))
+        end)
+        if ok2 then
+            revStat.shot = revStat.shot + 1
+            revStat.err = "fallback"
+            return true
+        end
+        revStat.err = "click:" .. tostring_(err2)
+        return false
+    end
+
+    -- DOUBLE TRAP — statystyka (odczyt: _G.__liptonDTStat) + helper drugiego
+    -- strzału POZA COOLDOOWNEM: shoot() blokuje ogień wyłącznie flagą
+    -- IsShooting (do czasu delaya FireRate wewnątrz gry), więc przed drugim
+    -- strzałem wymuszamy gotowość (IsShooting = false) i przywracamy, gdyby
+    -- strzał nie wypalił — gra i tak skasuje flagę swoim delayem. Strzał2
+    -- wychodzi więc w tej samej klatce co strzał1.
+    -- Cel: najpierw DRUGI wystający wróg (przy dwóch wychylonych — po kuli
+    -- na każdego); bez drugiego — powtórka w pierwszy cel. Bez celu strzał
+    -- nie wychodzi.
+    local dtStat = { shot = 0, skip = 0, err = "" }
+    G.__liptonDTStat = dtStat
+    -- Cel drugiego strzału (wspólny dla ścieżek LPM i R8): NAJPIERW inny
+    -- wystający wróg (skip pierwszego celu — przy dwóch wychylonych po kuli
+    -- na każde); bez drugiego → powtórka w pierwszy cel (dobicie po pudle /
+    -- strzale obok); nikogo → nil (zero ślepego ognia).
+    local function doubleTapTarget(origin, ignoreList, range, char1)
+        local t2, a2 = findSilentTarget(origin, ignoreList, range, nil, char1)
+        if not t2 then
+            t2, a2 = findSilentTarget(origin, ignoreList, range, char1)
+        end
+        return t2, a2
+    end
+    local function doubleTap(w, part1, ignoreList)
+        local pr = w.Properties
+        if not pr or pr.Class ~= "Weapon" then
+            dtStat.skip = dtStat.skip + 1
+            dtStat.err = "noweapon"
+            return
+        end
+        local char1 = part1 and part1:FindFirstAncestorWhichIsA("Model")
+        if not char1 then
+            dtStat.skip = dtStat.skip + 1
+            dtStat.err = "nochar"
+            return
+        end
+        if w.IsReloading then
+            dtStat.skip = dtStat.skip + 1
+            dtStat.err = "reload"
+            return
+        end
+        if (tonumber_(w.Rounds) or 1) <= 0 then
+            dtStat.skip = dtStat.skip + 1
+            dtStat.err = "norounds"
+            return
+        end
+        local myCh = plr.Character
+        if not myCh or myCh:GetAttribute("Dead") then
+            dtStat.skip = dtStat.skip + 1
+            dtStat.err = "dead"
+            return
+        end
+        if InvCtl == nil or InvCtl.getCurrentEquipped() ~= w then
+            dtStat.skip = dtStat.skip + 1
+            dtStat.err = "switch"
+            return
+        end
+        local camT = ws.CurrentCamera
+        if not camT then
+            dtStat.skip = dtStat.skip + 1
+            dtStat.err = "nocam"
+            return
+        end
+        local origin = camT.CFrame.Position
+        local range = G.__liptonLastRange or 1000
+        local t2, a2 = doubleTapTarget(origin, ignoreList, range, char1)
+        if not t2 then
+            dtStat.skip = dtStat.skip + 1
+            dtStat.err = "notarget"
+            return
+        end
+        -- POZA COOLDOOWNEM: czyścimy gotowość, strzał w tej samej klatce,
+        -- przywracamy flagę tylko gdyby strzał nie wypalił (gdy wypalił —
+        -- shoot sam ustawia IsShooting = true i jego delay FireRate to
+        -- skasuje). pcall: nawet gdyby shoot rzucił, redirectTarget i tak
+        -- wraca do nil (stary cel nie śledzi kolejnych pocisków).
+        redirectTarget, redirectAim = t2, a2
+        local wasShooting = w.IsShooting
+        w.IsShooting = false
+        pcall_(fireWeapon, w)
+        if not w.IsShooting and wasShooting then
+            w.IsShooting = true
+        end
+        redirectTarget, redirectAim = nil, nil
+        dtStat.shot = dtStat.shot + 1
+        dtStat.err = ""
+    end
+
+    -- DOUBLE TRAP pod R8 (ścieżka Auto Revolvera): drugi PPM POZA
+    -- COOLDOOWNEM — własny cd revStat zerowany i IsShooting gry wymuszony
+    -- na false → dwie kule z revolvera w jednej klatce. Cel jak wyżej;
+    -- nieudana próba = przywrócenie cd i licznika revStat bez szkody.
+    local function revolverDouble(w, prR, part1, ignoreList)
+        local char1 = part1 and part1:FindFirstAncestorWhichIsA("Model")
+        if not char1 then
+            dtStat.skip = dtStat.skip + 1
+            dtStat.err = "nochar"
+            return
+        end
+        if w.IsReloading then
+            dtStat.skip = dtStat.skip + 1
+            dtStat.err = "reload"
+            return
+        end
+        if (tonumber_(w.Rounds) or 1) <= 0 then
+            dtStat.skip = dtStat.skip + 1
+            dtStat.err = "norounds"
+            return
+        end
+        local camT = ws.CurrentCamera
+        if not camT then
+            dtStat.skip = dtStat.skip + 1
+            dtStat.err = "nocam"
+            return
+        end
+        local origin = camT.CFrame.Position
+        local range = G.__liptonLastRange or 1000
+        local t2, a2 = doubleTapTarget(origin, ignoreList, range, char1)
+        if not t2 then
+            dtStat.skip = dtStat.skip + 1
+            dtStat.err = "notarget"
+            return
+        end
+        redirectTarget, redirectAim = t2, a2
+        local wasShooting = w.IsShooting
+        local prevRev = lastRevShot
+        w.IsShooting = false
+        lastRevShot = 0
+        local ok2 = revolverShot(w, prR)
+        if not w.IsShooting and wasShooting then
+            w.IsShooting = true
+        end
+        if not ok2 then
+            lastRevShot = prevRev
+        end
+        redirectTarget, redirectAim = nil, nil
+        if ok2 then
+            dtStat.shot = dtStat.shot + 1
+            dtStat.err = ""
+        else
+            dtStat.skip = dtStat.skip + 1
+            dtStat.err = "rev:" .. (revStat.err or "")
+        end
     end
 
     local function silentTrigger()
         if not trigClean then return end
-        if not G.__liptonSilentAim then return end
+        if not silentAny() then return end
         if InvCtl == nil then return end
         if RaycastLib == nil or GetRayIgnore == nil then return end
         if uis:GetFocusedTextBox() ~= nil then return end
@@ -3684,21 +6225,78 @@ function startBloxStrikeScript()
         local part = findSilentTarget(camT.CFrame.Position, ignoreList, G.__liptonLastRange or 1000)
         if not part then return end
         local w = InvCtl.getCurrentEquipped()
-        -- TP SHOT: cel zza zasłoną → blink z bliska zamiast strzału przez
-        -- ścianę; przy czystym LOS normalny strzał (i tak pełny dmg).
-        if G.__liptonTPShot and not tpBusy then
-            local vch = part:FindFirstAncestorWhichIsA("Model")
-            if not clearOfWalls(camT.CFrame.Position, part, vch, ignoreList) then
-                if tpShotBlink(part, w) then return end
+        -- BRAMKA RUNDY: blink (TP Shot i Auto Knife) wyłącznie przy
+        -- "Round In Progress" — przy "Buy Period"/"Warmup" stoimy
+        -- spokojnie (kupowanie bez teleportów); blink wraca sam w start
+        -- rundy, gdy GameState się przełączy.
+        local roundLive = ws:GetAttribute("GameState") == "Round In Progress"
+        if roundLive and not tpBusy then
+            -- AUTO KNIFE (priorytet): blink za plecy + heavy = BackStab.
+            if G.__liptonAutoKnife then
+                local isMelee = w and w.Properties and w.Properties.Class == "Melee"
+                if not isMelee then
+                    equipKnife()
+                    tpStat.err = "knife-equip"
+                elseif tick_() - (w.WeaponEquippedTick or 0) <= 1 then
+                    tpStat.err = "knife-cd"
+                elseif w.IsShooting then
+                    tpStat.err = "knife-swing"
+                else
+                    tpStat.try = tpStat.try + 1
+                    if knifeBlink(part, w, ignoreList) then return end
+                end
+            end
+            -- TP SHOT: cel zza zasłoną → blink z bliska; gdy nóż przejął
+            -- ścieżkę (broń = Melee i Auto Knife ON), TP Shot nie mruga
+            -- z nożem w ręku — czeka na powrót do bronii palnej.
+            if G.__liptonTPShot and not (G.__liptonAutoKnife and w and w.Properties and w.Properties.Class == "Melee") then
+                tpStat.try = tpStat.try + 1
+                local vch = part:FindFirstAncestorWhichIsA("Model")
+                if not clearOfWalls(camT.CFrame.Position, part, vch, ignoreList) then
+                    if tpShotBlink(part, w) then return end
+                else
+                    tpStat.vis = tpStat.vis + 1
+                end
+            end
+        end
+        -- AUTO REVOLVER — strzela wyłącznie z revolverem i przez PPM gry;
+        -- z samą tą flagą inne bronie nie strzelają (tryb tylko-revolver),
+        -- z Silent Aim/Wallbang/TP Shot → zwykły fireWeapon (LPM).
+        local prR = w and w.Properties
+        if G.__liptonAutoRevolver then
+            if prR and prR.ShootingOptions == "Revolver" then
+                -- Para PPM poza cooldownem, gdy Double TapON — inaczej
+                -- singiel R8 jak dotychczas.
+                if revolverShot(w, prR) and G.__liptonDoubleTap then
+                    revolverDouble(w, prR, part, ignoreList)
+                end
+                return
+            end
+            if not (G.__liptonSilentAim or G.__liptonWallbang or G.__liptonTPShot or G.__liptonDoubleTap) then
+                return
             end
         end
         fireWeapon(w)
+        -- DOUBLE TRAP: drugi strzał POZA COOLDOOWNEM (ta sama klatka) —
+        -- drugi wychylony wróg (po kuli na każde), albo powtórka w
+        -- pierwszy cel, gdy nikogo drugiego nie ma.
+        if G.__liptonDoubleTap and prR and prR.Class == "Weapon" then
+            doubleTap(w, part, ignoreList)
+        end
     end
     trigClean = pcall(function()
         setfenv(silentTrigger, {})
         setfenv(fireWeapon, {})
         setfenv(tpShotBlink, {})
-        for _, f in ipairs({silentTrigger, fireWeapon, tpShotBlink}) do
+        setfenv(knifeBlink, {})
+        setfenv(equipKnife, {})
+        setfenv(silentAny, {})
+        setfenv(throughWalls, {})
+        setfenv(revolverShot, {})
+        setfenv(doubleTap, {})
+        setfenv(doubleTapTarget, {})
+        setfenv(revolverDouble, {})
+        for _, f in ipairs({silentTrigger, fireWeapon, tpShotBlink, knifeBlink, equipKnife, silentAny, throughWalls, revolverShot, doubleTap, doubleTapTarget, revolverDouble}) do
             local e = getfenv(f)
             if e.getgenv or e.hookfunction then
                 error("dirty env")
@@ -4016,16 +6614,75 @@ function startBloxStrikeScript()
     end)
 
     -- ESP (Highlight + tabliczka: wrogowie na czerwono, team na zielono)
+    --
+    -- NAPRAWA PO UPCIE GRY: ESP NIE MOŻE zależeć od wykrycia teamu.
+    -- Stary warunek (enemy OR teammate OR unknown) gasł CAŁKIEM, gdy gra
+    -- zmieniła atrybut teamu: źródło teamu → nil, a fallback "unknown"
+    -- wymagał Humanoid.Health — a BloxStrike Humanoidów NIE UŻYWA
+    -- (życie = atrybuty Health/Dead, patrz isAliveTarget) → zero ESP,
+    -- mimo że wcześniej wszyscy byli widoczni przez ściany. Teraz:
+    -- brak danych o teamie = kolor CZERWONY (jak wróg) i rysujemy DALEJ.
+    -- Zielony/czerwony rozróżnia się samo, gdy teamy wrócą do wykrycia.
+    --
+    -- NAPRAWA 2 (test na żywo: „team pokazuje, a wróg miga i znika"):
+    -- NIE kasujemy rysowania twardym filtrem isAliveTarget — po updacie
+    -- atrybuty Dead/Health u WROGÓW bywają nieaktualne (gra przestaje je
+    -- replikować przeciwnikom) → nick migał na starcie rundy i znikał,
+    -- a team (atrybuty aktualne) zostawał. Teraz rysujemy KAŻDEGO z
+    -- Head; isAliveTarget decyduje TYLKO o stylu (martwi na szaro +
+    -- "[DOWN]"). Diagnostyka (espLog) wypisuje w konsoli DLACZEGO
+    -- kogoś pominięto albo co się sypie — wrzuć log, jak coś nie gra.
+    -- UWAGA (limit rejestrów): startBloxStrikeScript siedzi NA GRANICY 200
+    -- lokalnych zmiennych Luau — dlatego throttle ostrzeżeń ESP trzymamy
+    -- w _G (jak _G.__liptonESPFrame wyżej), a NIE w kolejnym localu:
+    -- "Out of local registers when trying to allocate espErrShown".
+    _G.__liptonESPWarns = _G.__liptonESPWarns or {}
     runService.RenderStepped:Connect(function()
+        _G.__liptonESPFrame = (_G.__liptonESPFrame or 0) + 1
+        -- Diagnostyka ESP: max 1 wpis na gracza / 15 s (bez spamu co klatkę)
+        local function espLog(p, msg)
+            local slot = _G.__liptonESPWarns[p.UserId]
+            if not slot then
+                slot = {}
+                _G.__liptonESPWarns[p.UserId] = slot
+            end
+            if slot.msg ~= msg or tick() - (slot.t or 0) > 15 then
+                slot.msg = msg
+                slot.t = tick()
+                warn("[SzpontHub] BS ESP " .. p.Name .. ": " .. msg)
+            end
+        end
         for _, player in pairs(playersService:GetPlayers()) do
-            if player ~= plr and player.Character then
+            -- pcall na gracza: jeden zdegenerowany model (albo zmiana struktury
+            -- postaci po updacie) nie może uśmiercić całej pętli ESP — stary
+            -- błąd: pierwszy zły gracz = brak ESP dla WSZYSTKICH.
+            local ok, err = pcall(function()
+                if player == plr then return end
                 local char = player.Character
+                if not char then
+                    if espEnabled then espLog(player, "brak Character (postać ukryta/zniszczona?)") end
+                    return
+                end
                 local head = char:FindFirstChild("Head")
-                local enemy = isEnemy(player)
-                local teammate = isTeammate(player)
-                if espEnabled and head and (enemy or teammate) then
-                    local hum = char:FindFirstChildOfClass("Humanoid")
-                    local espColor = teammate and Color3.fromRGB(40, 255, 80) or Color3.fromRGB(255, 40, 40)
+                if not head then
+                    if espEnabled then espLog(player, "brak Head w postaci (gra ukrywa części?)") end
+                    return
+                end
+                if espEnabled then
+                    -- RYSUJEMY KAŻDEGO Z HEAD (jak przed updacie). Twardy
+                    -- filtr isAliveTarget kasował wrogów, bo atrybuty
+                    -- Dead/Health u przeciwników po updacie bywają nieaktualne
+                    -- (gra przestaje je replikować) → nick migał i znikał.
+                    local alive, why = isAliveTarget(player, char)
+                    local teammate = isTeammate(player)
+                    -- Brak teamu = TRAKTUJ JAK WROGA (czerwony). Lepiej
+                    -- pokazać wszystkich na czerwono niż nic nie widzieć.
+                    local espColor = teammate and Color3.fromRGB(40, 255, 80)
+                        or Color3.fromRGB(255, 40, 40)
+                    if not alive then
+                        espLog(player, "filtr: NIEZYWY (" .. tostring(why) .. ") — pokazuję na szaro")
+                        espColor = Color3.fromRGB(170, 170, 170)
+                    end
 
                     local highlight = char:FindFirstChild("BSHighlight") or Instance.new("Highlight", char)
                     highlight.Name = "BSHighlight"
@@ -4034,6 +6691,11 @@ function startBloxStrikeScript()
                     highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
                     highlight.FillTransparency = 0.5
                     highlight.OutlineTransparency = 0
+                    -- MUST: domyślnie Highlight jest Occluded (znika za
+                    -- ścianą) — w FPS-ie przez to ESP wygląda na martwe.
+                    -- AlwaysOnTop = render przez geometrię. Ustawiane CO
+                    -- KLATKĘ, żeby gra/anty-cheat nie zdążył nadpisać.
+                    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 
                     local billboard = head:FindFirstChild("BSBillboard") or Instance.new("BillboardGui", head)
                     billboard.Name = "BSBillboard"
@@ -4049,17 +6711,31 @@ function startBloxStrikeScript()
                     txt.TextStrokeTransparency = 0
                     txt.TextSize = 13
                     txt.Font = Enum.Font.SourceSansBold
-                    local hp = math.floor((hum and hum.Health) or tonumber(char:GetAttribute("Health")) or 0)
-                    local dist = math.floor((head.Position - cam.CFrame.Position).Magnitude)
-                    txt.Text = player.Name .. "\nHP: " .. hp .. " | " .. dist .. "m"
+                    local hum = char:FindFirstChildOfClass("Humanoid")
+                    local hp = math.floor((hum and hum.Health)
+                        or tonumber(char:GetAttribute("Health"))
+                        or tonumber(player:GetAttribute("Health")) or 0)
+                    -- Kamera ŁAPIANA NA ŻYWO: workspace.CurrentCamera jest
+                    -- niszczone i tworzone od nowa (respawn/spektator), więc
+                    -- cam złapany raz na starcie skryptu (linia 10) po tym
+                    -- martwieje, a odczyt CFrame z martwej kamery wywalał
+                    -- całą pętlę ESP dla wszystkich graczy.
+                    local camera = workspace.CurrentCamera or cam
+                    local dist = math.floor((head.Position - camera.CFrame.Position).Magnitude)
+                    txt.Text = player.Name .. (alive and "" or " [DOWN]")
+                        .. "\nHP: " .. hp .. " | " .. dist .. "m"
                 else
+                    -- Wyłączone: sprzątnij od razu. Martwych NIE kasujemy —
+                    -- atrybuty Dead/Health u wrogów bywają po updacie
+                    -- nieaktualne i kasowały ESP stojących na nogach.
                     local highlight = char:FindFirstChild("BSHighlight")
                     if highlight then highlight:Destroy() end
-                    if head then
-                        local billboard = head:FindFirstChild("BSBillboard")
-                        if billboard then billboard:Destroy() end
-                    end
+                    local billboard = head:FindFirstChild("BSBillboard")
+                    if billboard then billboard:Destroy() end
                 end
+            end)
+            if not ok then
+                espLog(player, "BLAD PETLI: " .. tostring(err))
             end
         end
     end)
