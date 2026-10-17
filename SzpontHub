@@ -4,6 +4,8 @@
 --   🔫 BloxStrike → pełne menu hacków BloxStrike
 --   🎯 Rivals     → menu hacków Rivals (opcje dodane później)
 print("chuj ci w dupe :D")
+-- marker wersji: po inject od razu widać w konsoli, KTÓRY plik ruszył
+print("[SzpontHub] build ESP-v2 start")
 -- Players przez GetService: game.Players kropką nie działa w tym DataModel
 local playersService = game:GetService("Players")
 local plr = playersService.LocalPlayer
@@ -29,7 +31,9 @@ local function getTargetGui()
     if success then
         return game:GetService("CoreGui")
     end
-    return plr:WaitForChild("PlayerGui")
+    -- limit 10 s: nawet gdyby ta ścieżka odpaliła (brak gethui/syn),
+    -- skrypt ma się ewentualnie wywalić, a NIE wisieć bez końca przy starcie
+    return plr and plr:WaitForChild("PlayerGui", 10) or game:GetService("CoreGui")
 end
 
 local targetParent = getTargetGui()
@@ -82,26 +86,41 @@ end)
 ------------------------------------------------------------
 do
     local RS = game:GetService("ReplicatedStorage")
-    local okIS, IS = pcall(require, RS:WaitForChild("ClientServices"):WaitForChild("ItemService"))
-    if okIS and type(IS) == "table" and not IS.__SzpFixed then
-        local okSync, Sync = pcall(require, RS:WaitForChild("Database"):WaitForChild("Sync"))
-        if okSync and type(Sync) == "table" then
-            local function fix(fn)
-                if type(fn) ~= "function" then return fn end
-                return function(self, a, b)
-                    -- Sync[x] istnieje tylko dla TYPÓW (Weapons/Effects/...),
-                    -- więc po tym poznajemy, który argument jest czym
-                    local aTyp = (type(a) == "string") and (Sync[a] ~= nil)
-                    local bTyp = (type(b) == "string") and (Sync[b] ~= nil)
-                    if aTyp and not bTyp then
-                        return fn(self, b, a)
+    -- WAITFORCHILD Z LIMITEM CZASU — NIGDY bez niego!
+    -- ClientServices/ItemService to struktura TYLKO MM2. W BloxStrike,
+    -- Rivals i Fisch tych folderów nie ma, a WaitForChild bez drugiego
+    -- argumentu czeka w nieskończoność. Co gorsza argumenty pcall liczą
+    -- się PRZED wywołaniem, więc ten pcall NIE chronił — skrypt startował
+    -- (dwa printy w konsoli), wieszał się tu na amen i GUI nigdy nie
+    -- powstawało. Objaw: "w MM2 inject działa, w BloxStrike nie".
+    -- Teraz: brak folderu = pomijamy naprawę ekwipunku i lecimy dalej.
+    local CS = RS:WaitForChild("ClientServices", 3)
+    local ISmod = CS and CS:WaitForChild("ItemService", 3)
+    if ISmod then
+        local okIS, IS = pcall(require, ISmod)
+        if okIS and type(IS) == "table" and not IS.__SzpFixed then
+            local DB = RS:WaitForChild("Database", 3)
+            local SyncMod = DB and DB:WaitForChild("Sync", 3)
+            local okSync, Sync = false, nil
+            if SyncMod then okSync, Sync = pcall(require, SyncMod) end
+            if okSync and type(Sync) == "table" then
+                local function fix(fn)
+                    if type(fn) ~= "function" then return fn end
+                    return function(self, a, b)
+                        -- Sync[x] istnieje tylko dla TYPÓW (Weapons/Effects/...),
+                        -- więc po tym poznajemy, który argument jest czym
+                        local aTyp = (type(a) == "string") and (Sync[a] ~= nil)
+                        local bTyp = (type(b) == "string") and (Sync[b] ~= nil)
+                        if aTyp and not bTyp then
+                            return fn(self, b, a)
+                        end
+                        return fn(self, a, b)
                     end
-                    return fn(self, a, b)
                 end
+                IS.GetItemInfo = fix(IS.GetItemInfo)
+                IS.FindItemInfo = fix(IS.FindItemInfo)
+                IS.__SzpFixed = true
             end
-            IS.GetItemInfo = fix(IS.GetItemInfo)
-            IS.FindItemInfo = fix(IS.FindItemInfo)
-            IS.__SzpFixed = true
         end
     end
 end
@@ -1591,9 +1610,15 @@ function startMainScript()
     -- też dla kodu gry) i ekwipunek wraca do normy.
     szpInv.patchItemService = function()
         local RS = game:GetService("ReplicatedStorage")
-        local okIS, IS = pcall(require, RS:WaitForChild("ClientServices"):WaitForChild("ItemService"))
+        -- limit 5 s + require wewnątrz pcall: WaitForChild bez limitu
+        -- wisiałby w nieskończoność, a jego wynik liczy się PRZED pcall
+        local okIS, IS = pcall(function()
+            return require(RS:WaitForChild("ClientServices", 5):WaitForChild("ItemService", 5))
+        end)
         if not okIS or type(IS) ~= "table" or IS.__SzpFixed then return false end
-        local okSync, Sync = pcall(require, RS:WaitForChild("Database"):WaitForChild("Sync"))
+        local okSync, Sync = pcall(function()
+            return require(RS:WaitForChild("Database", 5):WaitForChild("Sync", 5))
+        end)
         if not okSync or type(Sync) ~= "table" then return false end
         local function fix(fn)
             if type(fn) ~= "function" then return fn end
@@ -1763,7 +1788,9 @@ function startMainScript()
         local list = gameInv()
         if not list then return 0 end
         local RS = game:GetService("ReplicatedStorage")
-        local okIS, ItemSvc = pcall(require, RS:WaitForChild("ClientServices"):WaitForChild("ItemService"))
+        local okIS, ItemSvc = pcall(function()
+            return require(RS:WaitForChild("ClientServices", 5):WaitForChild("ItemService", 5))
+        end)
         if not okIS or type(ItemSvc) ~= "table" then return 0 end
         local fixed = 0
         for _, c in ipairs(list:GetChildren()) do
@@ -1857,7 +1884,10 @@ function startMainScript()
     -- prawdą tylko do najbliższego odrodzenia.
 
     szpInv.reqIS = function()
-        local ok, IS = pcall(require, game:GetService("ReplicatedStorage"):WaitForChild("ClientServices"):WaitForChild("InventoryService"))
+        local ok, IS = pcall(function()
+            return require(game:GetService("ReplicatedStorage")
+                :WaitForChild("ClientServices", 5):WaitForChild("InventoryService", 5))
+        end)
         return ok and IS or nil
     end
 
@@ -2014,7 +2044,8 @@ function startMainScript()
         skinsLoaded = true
         skinStatus.Text = "Wczytywanie bazy gry..."
         local ok, Sync = pcall(function()
-            return require(game:GetService("ReplicatedStorage"):WaitForChild("Database"):WaitForChild("Sync"))
+            return require(game:GetService("ReplicatedStorage")
+                :WaitForChild("Database", 5):WaitForChild("Sync", 5))
         end)
         -- Sync.Weapons to pełna baza (1004 pozycje); Item jest jej kopią,
         -- dlatego bierzemy Weapons, a Item zostaje jako zapasowe źródło
