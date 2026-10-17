@@ -3777,6 +3777,253 @@ function startMainScript()
 end
 
 ------------------------------------------------------------
+-- ESP BLOXSTRIKE v2 — napisane OD NOWA, bo v1 nie przeżyło updacie gry.
+--
+-- DLACZEGO v1 padało: BloxStrike ma WLASNY system postaci i po updacie
+-- v1 wymagało player.Character + Head + świeżego bufora pozycji, przez
+-- co dla każdego wypisywało "brak Character i brak świeżej pozycji"
+-- i zostawała garstka ludzi z rysunkiem.
+--
+-- ROZGNIETANY SYSTEM GRY (sonda na żywo w client PID 8052):
+--   Player.Team            = "Terrorists" / "Counter-Terrorists" (STRING)
+--   Player.Health/MaxHealth= 0..100 / 100
+--   Player.Dead            = true/false      Player.IsCrouching
+--   Player.CurrentEquipped = JSON z "Name":"AK-47" — trzymana broń
+--   Model = player.Character, wisi w Workspace.Characters pod nickiem:
+--   Health/Dead/MaxHealth, PresentationOwnerUserId = UserId,
+--   CharacterName — i ZERO Humanoida (tylko AnimationController),
+--   więc wszelkie czytanie Humanoid.Health dawało 0 albo nil.
+--
+-- NOWY SPOSÓB:
+--   1. Cel = model z player.Character ALBO z folderu gry (nazwa nicku,
+--      a jak nie — po PresentationOwnerUserId). Listę celów
+--      przebudowujemy co 0.4 s, a nie co klatkę (AGENTS: żadnych
+--      skanów w RenderStepped).
+--   2. Kotwica etykiety: Head → HumanoidRootPart → PrimaryPart →
+--      najwyższa część. Brak Head ZMIENIA kotwicę, nie kasuje gracza.
+--   3. Zero filtrów "nie żyje = nie rysujemy" — martwy z modelem
+--      dostaje szary + [DOWN], bez modelu i tak nie ma czego oznaczyć.
+--   4. Kolor z Player.Team (porównanie stringów) — team zielony,
+--      wróg czerwony; brak teamu = czerwony (lepiej pokazać niż pominąć).
+--   5. Pętla JEDNA w _G + getter z huba, bo _G przeżywa reiniekcję —
+--      bez tego każdy insert = kolejny RenderStepped i dublowane GUI.
+------------------------------------------------------------
+function startBsEspNew(getOn)
+    -- Getter z NAJNOWSZEJ instalacji huba zawsze nadpisuje stary,
+    -- a samą pętlę spinamy tylko raz.
+    _G.__liptonBsEspGetter = getOn
+    if _G.__liptonBsEspLoop then return end
+    _G.__liptonBsEspLoop = true
+
+    local Players = game:GetService("Players")
+    local RS = game:GetService("RunService")
+    local me = Players.LocalPlayer
+
+    local REBUILD = 0.4   -- sekundy między pełnym szukaniem celów
+    local rebuildAt = 0
+    local targets = {}    -- { {p=gracz, m=model, a=kotwica}, ... }
+
+    -- Kotwica rysowania: Head jest najlepszy (nick nad głową), reszta to
+    -- zabezpieczenie, gdy gra ukryje/zmieni budowę postaci po updacie.
+    -- GetDescendants wychodzi TYLKO gdy Head/HRP/PrimaryPart padną.
+    local function findAnchor(m)
+        local a = m:FindFirstChild("Head")
+            or m:FindFirstChild("HumanoidRootPart")
+            or m.PrimaryPart
+        if a then return a end
+        local bestY, best = -math.huge, nil
+        for _, d in ipairs(m:GetDescendants()) do
+            if d:IsA("BasePart") and d.Position.Y > bestY then
+                bestY, best = d.Position.Y, d
+            end
+        end
+        return best
+    end
+
+    local function rebuild()
+        local fresh = {}
+        local cf = workspace:FindFirstChild("Characters")
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= me then
+                local m = p.Character
+                if not (m and m.Parent) and cf then
+                    -- tu v1 umierało całkowicie: model jest w folderze
+                    -- gry, nie zawsze podpięty jako player.Character
+                    m = cf:FindFirstChild(p.Name)
+                    if not m then
+                        for _, c in ipairs(cf:GetChildren()) do
+                            if c:IsA("Model")
+                                and c:GetAttribute("PresentationOwnerUserId") == p.UserId then
+                                m = c
+                                break
+                            end
+                        end
+                    end
+                end
+                if m then
+                    fresh[#fresh + 1] = { p = p, m = m, a = findAnchor(m) }
+                end
+            end
+        end
+        targets = fresh
+    end
+
+    local function isTeammate(p)
+        -- Ich Team to string w atrybucie — porównujemy 1:1.
+        local t = p:GetAttribute("Team")
+        local mine = me:GetAttribute("Team")
+        if t ~= nil and mine ~= nil then return t == mine end
+        if p.Team and me.Team then return p.Team == me.Team end
+        return false  -- brak danych = wróg (czerwony zamiast pustego ekranu)
+    end
+
+    local function hpOf(p, m)
+        -- Kolejność model → gracz → Humanoid: w ich systemie liczy się
+        -- atrybut, a Humanoida u wrogów po prostu nie ma (nil).
+        local hp = tonumber(m:GetAttribute("Health"))
+            or tonumber(p:GetAttribute("Health"))
+        if hp == nil then
+            local hum = m:FindFirstChildOfClass("Humanoid")
+            hp = hum and hum.Health or 0
+        end
+        return math.floor(hp)
+    end
+
+    local function isDead(p, m)
+        local d = p:GetAttribute("Dead")
+        if d == nil then d = m:GetAttribute("Dead") end
+        if d == true or d == 1 or d == "true" then return true end
+        local hp = tonumber(m:GetAttribute("Health"))
+            or tonumber(p:GetAttribute("Health"))
+        return hp == 0
+    end
+
+    -- Trzymana broń z ich JSON-a w atrybucie — wycinamy samą nazwę,
+    -- bez parsowania obiektu (tanie string.match na atrybucie).
+    local function weaponOf(p)
+        local s = p:GetAttribute("CurrentEquipped")
+        if type(s) ~= "string" then return nil end
+        return s:match('"Name"%s*:%s*"([^"]+)"')
+    end
+
+    local function clearAll()
+        for _, t in ipairs(targets) do
+            local hl = t.m and t.m:FindFirstChild("BsEspHL")
+            if hl then hl:Destroy() end
+            local bb = t.a and t.a:FindFirstChild("BsEspBB")
+            if bb then bb:Destroy() end
+        end
+        targets = {}
+    end
+
+    -- Start: sprzątnij po poprzedniej instalacji huba, żeby reiniekcja
+    -- nie zostawiła osieroconych etykiet na postaciach.
+    local cf0 = workspace:FindFirstChild("Characters")
+    if cf0 then
+        for _, c in ipairs(cf0:GetChildren()) do
+            local hl = c:FindFirstChild("BsEspHL")
+            if hl then hl:Destroy() end
+            local h = c:FindFirstChild("Head")
+            local bb = h and h:FindFirstChild("BsEspBB")
+            if bb then bb:Destroy() end
+        end
+    end
+
+    RS.RenderStepped:Connect(function()
+        local getter = _G.__liptonBsEspGetter
+        if not (getter and getter()) then
+            if #targets > 0 then clearAll() end
+            return
+        end
+
+        local now = tick()
+        if now - rebuildAt >= REBUILD then
+            rebuildAt = now
+            rebuild()
+        end
+
+        local cam = workspace.CurrentCamera
+        for i = #targets, 1, -1 do
+            local t = targets[i]
+            local m = t.m
+            if not (m and m.Parent) then
+                -- model zniknął (respawn/koniec rundy) — pełna przebudowa
+                -- i tak go przyniesie, więc tylko odkładamy z listy
+                table.remove(targets, i)
+            else
+                local a = t.a
+                if not (a and a.Parent) then
+                    a = findAnchor(m)
+                    t.a = a
+                end
+                if a then
+                    local dead = isDead(t.p, m)
+                    local color = dead and Color3.fromRGB(150, 150, 150)
+                        or (not isTeammate(t.p)
+                            and Color3.fromRGB(255, 45, 45)
+                            or Color3.fromRGB(45, 255, 90))
+
+                    -- HIGHLIGHT tworzony raz, ale atrybuty wymuszane CO
+                    -- klatkę: domyślny Occluded chowa ESP za ścianą, a gra
+                    -- potrafi nadpisać DepthMode — dlatego wraca tu co tick.
+                    local hl = m:FindFirstChild("BsEspHL")
+                    if not hl then
+                        hl = Instance.new("Highlight")
+                        hl.Name = "BsEspHL"
+                        hl.Parent = m
+                    end
+                    hl.Adornee = m
+                    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                    hl.FillColor = color
+                    hl.FillTransparency = 0.55
+                    hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+                    hl.OutlineTransparency = 0
+
+                    local bb = a:FindFirstChild("BsEspBB")
+                    if not bb then
+                        bb = Instance.new("BillboardGui")
+                        bb.Name = "BsEspBB"
+                        bb.Parent = a
+                        bb.ResetOnSpawn = false
+                    end
+                    bb.Size = UDim2.new(0, 180, 0, 48)
+                    bb.StudsOffset = Vector3.new(0, 3.2, 0)
+                    bb.AlwaysOnTop = true
+                    bb.Enabled = true
+
+                    local txt = bb:FindFirstChild("BsEspTxt")
+                    if not txt then
+                        txt = Instance.new("TextLabel")
+                        txt.Name = "BsEspTxt"
+                        txt.Parent = bb
+                        txt.BackgroundTransparency = 1
+                        txt.Font = Enum.Font.SourceSansBold
+                        txt.TextStrokeTransparency = 0
+                    end
+                    txt.Size = UDim2.new(1, 0, 1, 0)
+                    txt.TextSize = 13
+                    txt.TextColor3 = color
+
+                    local line = t.p.Name
+                    if dead then line = line .. " [DOWN]" end
+                    local w = weaponOf(t.p)
+                    if w then line = line .. " [" .. w .. "]" end
+                    if t.p:GetAttribute("IsCrouching") then
+                        line = line .. " (kuca)"
+                    end
+                    local dist = ""
+                    if cam then
+                        dist = " | " .. math.floor(
+                            (a.Position - cam.CFrame.Position).Magnitude) .. "m"
+                    end
+                    txt.Text = line .. "\nHP " .. hpOf(t.p, m) .. dist
+                end
+            end
+        end
+    end)
+end
+
+------------------------------------------------------------
 -- HACKI: BLOXSTRIKE (FPS)
 ------------------------------------------------------------
 function startBloxStrikeScript()
@@ -6613,132 +6860,17 @@ function startBloxStrikeScript()
         end
     end)
 
-    -- ESP (Highlight + tabliczka: wrogowie na czerwono, team na zielono)
-    --
-    -- NAPRAWA PO UPCIE GRY: ESP NIE MOŻE zależeć od wykrycia teamu.
-    -- Stary warunek (enemy OR teammate OR unknown) gasł CAŁKIEM, gdy gra
-    -- zmieniła atrybut teamu: źródło teamu → nil, a fallback "unknown"
-    -- wymagał Humanoid.Health — a BloxStrike Humanoidów NIE UŻYWA
-    -- (życie = atrybuty Health/Dead, patrz isAliveTarget) → zero ESP,
-    -- mimo że wcześniej wszyscy byli widoczni przez ściany. Teraz:
-    -- brak danych o teamie = kolor CZERWONY (jak wróg) i rysujemy DALEJ.
-    -- Zielony/czerwony rozróżnia się samo, gdy teamy wrócą do wykrycia.
-    --
-    -- NAPRAWA 2 (test na żywo: „team pokazuje, a wróg miga i znika"):
-    -- NIE kasujemy rysowania twardym filtrem isAliveTarget — po updacie
-    -- atrybuty Dead/Health u WROGÓW bywają nieaktualne (gra przestaje je
-    -- replikować przeciwnikom) → nick migał na starcie rundy i znikał,
-    -- a team (atrybuty aktualne) zostawał. Teraz rysujemy KAŻDEGO z
-    -- Head; isAliveTarget decyduje TYLKO o stylu (martwi na szaro +
-    -- "[DOWN]"). Diagnostyka (espLog) wypisuje w konsoli DLACZEGO
-    -- kogoś pominięto albo co się sypie — wrzuć log, jak coś nie gra.
-    -- UWAGA (limit rejestrów): startBloxStrikeScript siedzi NA GRANICY 200
-    -- lokalnych zmiennych Luau — dlatego throttle ostrzeżeń ESP trzymamy
-    -- w _G (jak _G.__liptonESPFrame wyżej), a NIE w kolejnym localu:
-    -- "Out of local registers when trying to allocate espErrShown".
+    -- ESP BloxStrike przeniesione do startBsEspNew() (v2) — cały opis
+    -- rozgryzionego systemu gry i przyczyn porażki v1 jest w komentarzu
+    -- nad definicją tej funkcji. Tu zostaje tylko inicjalizacja stanu
+    -- ostrzeżeń (używana ogólnie, niezależnie od wersji ESP).
     _G.__liptonESPWarns = _G.__liptonESPWarns or {}
-    runService.RenderStepped:Connect(function()
-        _G.__liptonESPFrame = (_G.__liptonESPFrame or 0) + 1
-        -- Diagnostyka ESP: max 1 wpis na gracza / 15 s (bez spamu co klatkę)
-        local function espLog(p, msg)
-            local slot = _G.__liptonESPWarns[p.UserId]
-            if not slot then
-                slot = {}
-                _G.__liptonESPWarns[p.UserId] = slot
-            end
-            if slot.msg ~= msg or tick() - (slot.t or 0) > 15 then
-                slot.msg = msg
-                slot.t = tick()
-                warn("[SzpontHub] BS ESP " .. p.Name .. ": " .. msg)
-            end
-        end
-        for _, player in pairs(playersService:GetPlayers()) do
-            -- pcall na gracza: jeden zdegenerowany model (albo zmiana struktury
-            -- postaci po updacie) nie może uśmiercić całej pętli ESP — stary
-            -- błąd: pierwszy zły gracz = brak ESP dla WSZYSTKICH.
-            local ok, err = pcall(function()
-                if player == plr then return end
-                local char = player.Character
-                if not char then
-                    if espEnabled then espLog(player, "brak Character (postać ukryta/zniszczona?)") end
-                    return
-                end
-                local head = char:FindFirstChild("Head")
-                if not head then
-                    if espEnabled then espLog(player, "brak Head w postaci (gra ukrywa części?)") end
-                    return
-                end
-                if espEnabled then
-                    -- RYSUJEMY KAŻDEGO Z HEAD (jak przed updacie). Twardy
-                    -- filtr isAliveTarget kasował wrogów, bo atrybuty
-                    -- Dead/Health u przeciwników po updacie bywają nieaktualne
-                    -- (gra przestaje je replikować) → nick migał i znikał.
-                    local alive, why = isAliveTarget(player, char)
-                    local teammate = isTeammate(player)
-                    -- Brak teamu = TRAKTUJ JAK WROGA (czerwony). Lepiej
-                    -- pokazać wszystkich na czerwono niż nic nie widzieć.
-                    local espColor = teammate and Color3.fromRGB(40, 255, 80)
-                        or Color3.fromRGB(255, 40, 40)
-                    if not alive then
-                        espLog(player, "filtr: NIEZYWY (" .. tostring(why) .. ") — pokazuję na szaro")
-                        espColor = Color3.fromRGB(170, 170, 170)
-                    end
-
-                    local highlight = char:FindFirstChild("BSHighlight") or Instance.new("Highlight", char)
-                    highlight.Name = "BSHighlight"
-                    highlight.Adornee = char
-                    highlight.FillColor = espColor
-                    highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
-                    highlight.FillTransparency = 0.5
-                    highlight.OutlineTransparency = 0
-                    -- MUST: domyślnie Highlight jest Occluded (znika za
-                    -- ścianą) — w FPS-ie przez to ESP wygląda na martwe.
-                    -- AlwaysOnTop = render przez geometrię. Ustawiane CO
-                    -- KLATKĘ, żeby gra/anty-cheat nie zdążył nadpisać.
-                    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-
-                    local billboard = head:FindFirstChild("BSBillboard") or Instance.new("BillboardGui", head)
-                    billboard.Name = "BSBillboard"
-                    billboard.Size = UDim2.new(0, 120, 0, 50)
-                    billboard.StudsOffset = Vector3.new(0, 2.5, 0)
-                    billboard.AlwaysOnTop = true
-
-                    local txt = billboard:FindFirstChild("BSText") or Instance.new("TextLabel", billboard)
-                    txt.Name = "BSText"
-                    txt.Size = UDim2.new(1, 0, 1, 0)
-                    txt.BackgroundTransparency = 1
-                    txt.TextColor3 = espColor
-                    txt.TextStrokeTransparency = 0
-                    txt.TextSize = 13
-                    txt.Font = Enum.Font.SourceSansBold
-                    local hum = char:FindFirstChildOfClass("Humanoid")
-                    local hp = math.floor((hum and hum.Health)
-                        or tonumber(char:GetAttribute("Health"))
-                        or tonumber(player:GetAttribute("Health")) or 0)
-                    -- Kamera ŁAPIANA NA ŻYWO: workspace.CurrentCamera jest
-                    -- niszczone i tworzone od nowa (respawn/spektator), więc
-                    -- cam złapany raz na starcie skryptu (linia 10) po tym
-                    -- martwieje, a odczyt CFrame z martwej kamery wywalał
-                    -- całą pętlę ESP dla wszystkich graczy.
-                    local camera = workspace.CurrentCamera or cam
-                    local dist = math.floor((head.Position - camera.CFrame.Position).Magnitude)
-                    txt.Text = player.Name .. (alive and "" or " [DOWN]")
-                        .. "\nHP: " .. hp .. " | " .. dist .. "m"
-                else
-                    -- Wyłączone: sprzątnij od razu. Martwych NIE kasujemy —
-                    -- atrybuty Dead/Health u wrogów bywają po updacie
-                    -- nieaktualne i kasowały ESP stojących na nogach.
-                    local highlight = char:FindFirstChild("BSHighlight")
-                    if highlight then highlight:Destroy() end
-                    local billboard = head:FindFirstChild("BSBillboard")
-                    if billboard then billboard:Destroy() end
-                end
-            end)
-            if not ok then
-                espLog(player, "BLAD PETLI: " .. tostring(err))
-            end
-        end
-    end)
+    -- STARE ESP WYRZUCONE (v1 czytalo player.Character + Head + bufor
+    -- pozycji i po updacie gry wyrzucalo wszystkich: "brak Character i brak
+    -- swiezej pozycji"). Teraz rysuje startBsEspNew() — oparte wylacznie na
+    -- atrybutach wlasnego systemu BloxStrike (Team/Health/Dead), patrz
+    -- komentarz przy funkcji.
+    startBsEspNew(function() return espEnabled end)
 
     updateActiveCheatsList()
 end
