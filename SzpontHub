@@ -11,6 +11,7 @@ local playersService = game:GetService("Players")
 local plr = playersService.LocalPlayer
 local cam = workspace.CurrentCamera
 local runService = game:GetService("RunService")
+
 local uis = game:GetService("UserInputService")
 local vu = game:GetService("VirtualUser")
 local tweenService = game:GetService("TweenService")
@@ -576,10 +577,25 @@ function startMainScript()
     local FARM_MAX_STEP = 0.7       -- twardy limit kroku na tick (studs)
     local FARM_DT_CLAMP = 0.05      -- lag > 50 ms liczymy jako 50 ms
     local FARM_STUCK_TIME = 3       -- sekundy stania przy monecie bez efektu
-    local FARM_BLACKLIST_TIME = 10  -- sekundy ignorowania takiej monety
     local FARM_SCAN_INTERVAL = 1    -- odświeżenie listy żywych monet (s)
     local FARM_EMPTY_SCAN_INTERVAL = 0.75 -- rzadsze odświeżenie, gdy lista pusta
     local FARM_TARGET_RANGE = 200   -- ignorujemy monety dalej niż X studs
+
+    -- ZBIERANIE PODCZAS UCIECZKI: stary kod przy mordercy blisko uciekał i
+    -- sterczał w miejscu — cukierki/monety leżące po drodze przepadały, a
+    -- morderca i tak doganiał gracza (chód ~16 vs farma 24, więc dystans
+    -- i tak się odbudowywał). Teraz w trakcie ucieczki farma łapie pickupy,
+    -- o ile nie prowadzą prosto w stronę noża:
+    --   FARM_ESCAPE_GRAB_RANGE  -- jak daleko cukierek może leżeć, byśmy po niego poszli
+    --   FARM_ESCAPE_SAFE_DOT   -- minimalny cos kąta: cel musi leżeć "OD mordercy"
+    --                             (0 = prosto na niego, 1 = prosto od niego)
+    --   FARM_ESCAPE_GRAB_NEAR  -- tak blisko, że łapanie jest praktycznie za darmo
+    --   FARM_ESCAPE_GRAB_TIME  -- ile sekund z rzędu wolno próbować dobiec do celu
+    --                             (potem przerwa, by morderca nas dogonił)
+    local FARM_ESCAPE_GRAB_RANGE = 30
+    local FARM_ESCAPE_SAFE_DOT  = 0.1
+    local FARM_ESCAPE_GRAB_NEAR = 3
+    local FARM_ESCAPE_GRAB_TIME = 1.2
 
     -- TP FARM: "teleport" do monety co tp.sec sekund (suwak 0.5-5.0 s).
     -- ANTI-KICK "Invalid position" (Error 267): MM2 kopało za KAŻDĄ próbę
@@ -1133,6 +1149,12 @@ function startMainScript()
     -- (ikona, kolor rzadkości). To tylko obiekt GUI u Ciebie: ZERO remoteów,
     -- serwer o niczym nie wie, nie ma ryzyka kicka.
     ------------------------------------------------------------
+    -- BLOK LOKALNY (do ... end): Luau limituje liczbę lokalnych rejestrów
+    -- na 200 na funkcję. Ta sekcja (SKINY) deklaruje ~39 lokalnych, a
+    -- startMainScript miał ich 207 → plik się nie kompilował
+    -- ("Out of local registers ... exceeded limit 200"). Zamknięcie sekcji
+    -- w bloku zwalnia rejestry po jej końcu (207 → ~168), logika bez zmian.
+    do
     local skins, skinsLoaded = {}, false
     local skinFilter = "ALL"
     local selectedSkin, skinButtons = nil, {}
@@ -2212,6 +2234,7 @@ function startMainScript()
             end
         end)
     end
+    end -- koniec bloku SEKCJA SKINY (zwalnia lokalne rejestry)
 
     -- PANEL PO PRAWEJ: 🔥 LiptonHub List 🔥
     local activeCheatsGui = Instance.new("ScreenGui")
@@ -2989,9 +3012,14 @@ function startMainScript()
     --    task.wait — po lag spike'u (dt = 0.5 s) postać skakała 12-15 studów
     --    w JEDNEJ klatce. Teraz: dt przycięty + twardy limit kroku na tick
     --    + efektywna prędkość przycięta do progu bezpieczeństwa.
-    --  * ANTI-STUCK: moneta, przy której stoimy i która nic nie zalicza
-    --    (w ścianie / niedostępna / serwer jej nie zbiera), trafia na
-    --    blacklistę — koniec stania w jednym miejscu.
+    --  * ANTI-STUCK: moneta, przy której stoimy i która nic nie zalicza,
+    --    jest odrzucana NA STAŁE (stary kod: blacklist tylko na10 s, więc
+    --    farma po tym czasie wracała do tej samej "fantomowej" monety
+    --    w kółko). Czarną listę czyści dopiero pełny skan przy pustej
+    --    mapie = zmiana rundy (nowe instancje monet = nowe klucze).
+    --  * NOCLIP: na czas farmy kolizja wyłączona — postać przechodzi przez
+    --    ściany i nie buguje się w nich (pozycją steruje CFrame co klatkę,
+    --    więc kolizja tylko przeszkadzała). Przywracamy przy wyłączeniu.
     --  * bez PlatformStand — postać nie kładzie się na ziemi po monety
     --  * skanowanie monet przycięte: pusta lista = pełny skan workspace
     --    raz na kilka sekund, nie 30 razy na sekundę (80k+ instancji = lag)
@@ -3000,8 +3028,21 @@ function startMainScript()
     local coinScanClock = 999
     local coinBlacklist = {}   -- Part monety -> os.clock() końca blokady
     local farmStuckCoin = nil  -- moneta, przy której stoimy bez efektu
+    -- koordynacja ruchu (Auto Farm / TP Farm / Auto Kill All / Auto TP Gun):
+    -- wszystkie sterują CFrame postaci, więc gdy któreś właśnie teleportuje,
+    -- pozostałe robią przerwę — inaczej pętle walczą o pozycję co klatkę
+    local killBusy = false      -- true = Auto Kill All w trakcie zabójstwa
+    local gunDropRef = nil      -- ostatni znany GunDrop (szuka tylko Auto TP Gun)
     local farmStuckClock = 0
     local farmFullScanTick = 0
+    -- zegar "dobiegania do celu" podczas ucieczki: trzymamy go, żeby farma
+    -- nie goniła w kółko za jednym nieosiągalnym pickupem (morderca by nas
+    -- dogonił). Gdy cel zniknie / przerwa, zegar się zeruje.
+    local farmEscapeGrabClock = 0
+    -- aktualnie goniowany pickup w trybie ucieczki: gdy cel sie zmieni
+    -- (nowa moneta), zegar startuje od nowa — inaczej po 1,2 s przestalibyśmy
+    -- łapać w ogóle, nawet gdy zbieranie działa
+    local farmEscapeGrabTarget = nil
 
     local function isCoinAlive(part)
         if not part or not part.Parent then return false end
@@ -3010,6 +3051,29 @@ function startMainScript()
         if part:GetAttribute("Collected") or part:GetAttribute("Delete") then return false end
         for _, d in ipairs(part:GetDescendants()) do
             if d:GetAttribute("Collected") or d:GetAttribute("Delete") then return false end
+        end
+        -- WIDOCZNY KAWAŁEK MONETY = dowód życia: widok robi dziecko MainCoin,
+        -- a po zbiciu serwer je chowa (Transparency=1 lub kasuje) i CZĘSTO nie
+        -- stawia atrybutu Collected — bez tego checku farma widziała "fantomową"
+        -- monetę i po wygaśnięciu blacklisty celowała w nią znowu.
+        -- Rodzeństwo szukamy TYLKO jako bezpośrednie dziecko (bez recursive),
+        -- bo przy płaskiej strukturze recursive znalazłby MainCoin INNEJ monety.
+        local vis = part:FindFirstChild("MainCoin", true)
+            or (part.Parent and part.Parent:FindFirstChild("MainCoin"))
+        if vis then
+            if vis:IsA("BasePart") then
+                if vis.Transparency >= 1 then return false end
+            else
+                -- MainCoin bywa Modelem: liczy się czy jakakolwiek jego część jest widoczna
+                local widoczna = false
+                for _, vp in ipairs(vis:GetDescendants()) do
+                    if vp:IsA("BasePart") and vp.Transparency < 1 then
+                        widoczna = true
+                        break
+                    end
+                end
+                if not widoczna then return false end
+            end
         end
         return true
     end
@@ -3037,24 +3101,39 @@ function startMainScript()
         end
     end
 
+    -- Rodzaje kontenerów z pickupami. "CoinContainer" to monety (sprawdzone
+    -- na żywo), pozostałe nazwy zgadujemy po cukierkach — jeśli gra ich nie
+    -- używa, FindFirstChild zwraca nil i nic się nie zmienia (koszt: jeden
+    -- FindFirstChild na mapę, czyli praktycznie zero).
+    local FARM_PICKUP_CONTAINERS = {
+        "CoinContainer", "CandyContainer", "SweetsContainer", "SweetContainer",
+    }
+
     local function refreshCoinCache(full)
         coinCache = {}
         -- mapy leżą jako bezpośredni children workspace, więc szukamy szybko
         for _, map in ipairs(workspace:GetChildren()) do
-            local container = map:FindFirstChild("CoinContainer")
-            if container then
-                collectCoinsFrom(container)
-            elseif map.Name == "CoinContainer" then
-                collectCoinsFrom(map)
+            for _, cname in ipairs(FARM_PICKUP_CONTAINERS) do
+                local container = map:FindFirstChild(cname)
+                if container then
+                    collectCoinsFrom(container)
+                elseif map.Name == cname then
+                    collectCoinsFrom(map)
+                end
             end
         end
         -- pełny skan workspace (80k+ instancji) tylko od święta: stary kod
         -- robił go 30 razy na sekundę, gdy nie było żywych monet → straszny lag
         if full and #coinCache == 0 then
+            -- mapa pusta = zmiana rundy: stare monety (razem z odrzuceniami)
+            -- zniknęły, a nowe dostają nowe instancje — czyścimy czarną listę
+            coinBlacklist = {}
             -- fallback: monety w nietypowym miejscu
             for _, d in ipairs(workspace:GetDescendants()) do
-                if d.Name == "CoinContainer" then
-                    collectCoinsFrom(d)
+                for _, cname in ipairs(FARM_PICKUP_CONTAINERS) do
+                    if d.Name == cname then
+                        collectCoinsFrom(d)
+                    end
                 end
             end
         end
@@ -3078,6 +3157,10 @@ function startMainScript()
         elseif plr.Character then
             local hum = plr.Character:FindFirstChildOfClass("Humanoid")
             if hum then hum.AutoRotate = true end
+            -- zdejmujemy noclip farmy (po respawnie nowa postać i tak ma kolizję)
+            for _, p in ipairs(plr.Character:GetChildren()) do
+                if p:IsA("BasePart") then p.CanCollide = true end
+            end
         end
     end)
 
@@ -3097,6 +3180,10 @@ function startMainScript()
         elseif plr.Character then
             local hum = plr.Character:FindFirstChildOfClass("Humanoid")
             if hum then hum.AutoRotate = true end
+            -- zdejmujemy noclip farmy (po respawnie nowa postać i tak ma kolizję)
+            for _, p in ipairs(plr.Character:GetChildren()) do
+                if p:IsA("BasePart") then p.CanCollide = true end
+            end
         end
     end)
 
@@ -3117,6 +3204,12 @@ function startMainScript()
                 end
 
                 if now >= tp.nextAt then
+                    -- KOORDYNACJA: zabójstwo (killBusy) albo leżąca broń
+                    -- (gunDropRef) — Auto Kill All / Auto TP Gun sterują wtedy
+                    -- postacią, TP Farm nie może im przeszkadzać chodzeniem.
+                    if killBusy or gunDropRef then
+                        tp.nextAt = now + 0.3  -- odpuść teraz, sprawdź za chwilę
+                    else
                     local char = plr.Character
                     local hrp = char and char:FindFirstChild("HumanoidRootPart")
                     local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -3183,6 +3276,7 @@ function startMainScript()
                     else
                         tp.nextAt = now + 0.5
                     end
+                    end -- koniec gałęzi "można się ruszać" (killBusy/gunDropRef)
                 end
             end
         end
@@ -3207,6 +3301,14 @@ function startMainScript()
             if autoFarmCoins and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
                 local hrp = plr.Character.HumanoidRootPart
                 local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+
+                -- NOCLIP NA CZAS FARMY: pozycją sterujemy co klatkę CFrame'em,
+                -- a kolizja tylko blokowała postać w ścianach (stanie w miejscu).
+                -- Humanoid potrafi sam odblokować kolizję części, więc ustawiamy
+                -- co tick. Włączający i wyłączający farmę przywracają kolizję.
+                for _, p in ipairs(plr.Character:GetChildren()) do
+                    if p:IsA("BasePart") then p.CanCollide = false end
+                end
 
                 coinScanClock = coinScanClock + dt
                 local empty = #coinCache == 0
@@ -3260,10 +3362,26 @@ function startMainScript()
                     end
                 end
 
-                if awayFromMur and (not hum or hum.Health > 0) then
-                    -- MORDERCA ZA BLISKO: TYLKO ucieczka, monety czekają.
-                    -- Prędkość farmy (max FARM_SAFE_SPEED_CAP=24) i tak wygrywa
-                    -- z chodem mordercy (~16), więc dystans się odbuduje.
+                if killBusy or gunDropRef then
+                    -- KOORDYNACJA: Auto Kill All (killBusy) albo Auto TP Gun
+                    -- (broń leży na ziemi, gunDropRef) właśnie sterują CFrame
+                    -- postaci — farma stoi w miejscu, żeby nie walczyć o
+                    -- pozycję. Gdy zabójstwo/broniń skończy się, farma wraca.
+                    if hum then hum.AutoRotate = true end
+                    farmStuckCoin, farmStuckClock = nil, 0
+                elseif awayFromMur and (not hum or hum.Health > 0) then
+                    -- MORDERCA ZA BLISKO: ucieczka — ale NIE przestajemy zbierać.
+                    -- Stary kod uciekał w czystą stronę i czekał, aż morderca
+                    -- odejdzie: przez to gracz tracił cukierki/monety leżące
+                    -- po drodze, a morderca i tak dogonił (chód ~16 vs farma 24,
+                    -- więc dystans i tak się odbudowywał). Teraz w trakcie
+                    -- ucieczki farma łapie pickupy, o ile nie prowadzą prosto
+                    -- na nóż:
+                    --  * cel leży "od mordercy" (cos >= FARM_ESCAPE_SAFE_DOT), albo
+                    --  * cel jest bardzo blisko (<= FARM_ESCAPE_GRAB_NEAR)
+                    -- Kierunek ruchu to mieszanka ucieczki + celu, więc wypadkowy
+                    -- wektor dalej "ucieka" (dot >= bezpieczny próg), a my
+                    -- jednocześnie docieramy do pickupa.
                     if hum then
                         hum.PlatformStand = false
                         hum.AutoRotate = false
@@ -3271,13 +3389,99 @@ function startMainScript()
                     hrp.Velocity = Vector3.new(0, 0, 0)
                     hrp.RotVelocity = Vector3.new(0, 0, 0)
 
-                    local escGoal = hrp.Position + awayFromMur.Unit * (farmAvoidDist + 2)
-                    local escOffset = escGoal - hrp.Position
-                    if escOffset.Magnitude > 0.05 then
-                        local escSpeed = math.clamp(farmSpeed, 5, FARM_SAFE_SPEED_CAP)
-                        local escStep = math.min(escOffset.Magnitude, escSpeed * dt, FARM_MAX_STEP)
-                        hrp.CFrame = CFrame.new(hrp.Position + escOffset.Unit * escStep)
-                            * (hrp.CFrame - hrp.CFrame.Position)
+                    local escDir = awayFromMur.Unit
+                    local moveDir = escDir
+                    local grabTarget = nil
+
+                    -- Wybór celu: NIE bierzemy po prostu najbliższej monety, bo
+                    -- może leżeć za nami (czyli w stronę mordercy). Szukamy
+                    -- najbliższej monety, do której pójście NIE zmniejsza
+                    -- odległości od noża (dot >= próg), albo bardzo bliskiej
+                    -- (tę łapiemy mimo wszystko — 3 study to ułamek sekundy).
+                    if #coinCache > 0 then
+                        local bestDist = math.huge
+                        for i = #coinCache, 1, -1 do
+                            local c = coinCache[i]
+                            if not isCoinAlive(c) then
+                                table.remove(coinCache, i)
+                            elseif not coinBlacklist[c] then
+                                local cDelta = c.Position - hrp.Position
+                                local flat = Vector3.new(cDelta.X, 0, cDelta.Z)
+                                local flatLen = flat.Magnitude
+                                if flatLen <= FARM_ESCAPE_GRAB_RANGE and flatLen < bestDist then
+                                    local safe = false
+                                    if flatLen > 0.05 then
+                                        safe = (escDir:Dot(flat.Unit)) >= FARM_ESCAPE_SAFE_DOT
+                                    end
+                                    if safe or flatLen <= FARM_ESCAPE_GRAB_NEAR then
+                                        bestDist = flatLen
+                                        grabTarget = c
+                                    end
+                                end
+                            end
+                        end
+                    end
+
+                    if grabTarget then
+                        -- NOWY cel → zegar od nowa (inna moneta = świeży start).
+                        -- Dzięki temu po udanym zebraniu farma wraca do łapania,
+                        -- zamiast po 1,2 s przestać łapać w ogóle.
+                        if grabTarget ~= farmEscapeGrabTarget then
+                            farmEscapeGrabTarget = grabTarget
+                            farmEscapeGrabClock = 0
+                        end
+                        -- zegar dobiegania: nie goniemy w kółko za jednym celem,
+                        -- bo morderca by nas dogonił. Po FARM_ESCAPE_GRAB_TIME
+                        -- przerywamy łapanie (zegar przestaje rosnąć, ale się nie
+                        -- zeruje — wrócimy do łapania, gdy cel zniknie/zmieni się).
+                        if farmEscapeGrabClock < FARM_ESCAPE_GRAB_TIME then
+                            farmEscapeGrabClock = farmEscapeGrabClock + dt
+                            local cDelta = grabTarget.Position - hrp.Position
+                            local flat = Vector3.new(cDelta.X, 0, cDelta.Z)
+                            if flat.Magnitude > 0.05 then
+                                -- mieszanka: ucieczka ma pierwszeństwo, cel tylko
+                                -- dokłada trochę — wypadkowy kierunek wciąż ucieka
+                                moveDir = (escDir + flat.Unit * 0.6).Unit
+                            end
+                        else
+                            grabTarget = nil
+                        end
+                    else
+                        -- brak bezpiecznego celu → sama ucieczka, zegar od nowa
+                        farmEscapeGrabClock = 0
+                        farmEscapeGrabTarget = nil
+                    end
+
+                    if grabTarget then
+                        -- cel: środek pickupa; blisko niego kręcimy się w kółko,
+                        -- bo Touched odpala się na POCZĄTKU kolizji (samo stanie
+                        -- w monecie nie gwarantuje zbioru) — tak samo jak w farmie
+                        local goal = grabTarget.Position
+                        if (hrp.Position - goal).Magnitude < 1.5 then
+                            local a = now * 8
+                            goal = goal + Vector3.new(math.cos(a), 0, math.sin(a)) * 1.4
+                        end
+                        local offset = goal - hrp.Position
+                        if offset.Magnitude > 0.05 then
+                            local escSpeed = math.clamp(farmSpeed, 5, FARM_SAFE_SPEED_CAP)
+                            local escStep = math.min(offset.Magnitude, escSpeed * dt, FARM_MAX_STEP)
+                            -- ruch po MIESZANCE (ucieczka + cel), nie prosto na cel:
+                            -- dzięki temu wciąż oddalamy się od mordercy, a
+                            -- jednocześnie docieramy do pickupa
+                            local step = (offset.Unit + moveDir) * 0.5
+                            if step.Magnitude < 0.01 then step = moveDir end
+                            hrp.CFrame = CFrame.new(hrp.Position + step.Unit * escStep)
+                                * (hrp.CFrame - hrp.CFrame.Position)
+                        end
+                    else
+                        local escGoal = hrp.Position + escDir * (farmAvoidDist + 2)
+                        local escOffset = escGoal - hrp.Position
+                        if escOffset.Magnitude > 0.05 then
+                            local escSpeed = math.clamp(farmSpeed, 5, FARM_SAFE_SPEED_CAP)
+                            local escStep = math.min(escOffset.Magnitude, escSpeed * dt, FARM_MAX_STEP)
+                            hrp.CFrame = CFrame.new(hrp.Position + escOffset.Unit * escStep)
+                                * (hrp.CFrame - hrp.CFrame.Position)
+                        end
                     end
                 elseif nearestCoin and (not hum or hum.Health > 0) then
                     if hum then
@@ -3294,7 +3498,11 @@ function startMainScript()
                             farmStuckCoin, farmStuckClock = nearestCoin, 0
                         end
                         if farmStuckClock >= FARM_STUCK_TIME then
-                            coinBlacklist[nearestCoin] = now + FARM_BLACKLIST_TIME
+                            -- odrzucamy TWARDO: stary kod blacklistował na10 s,
+                            -- po czym farma wracała do tej samej martwej monety
+                            -- w kółko. Teraz moneta jest ignorowana do końca
+                            -- rundy (clear przy pełnym skanie pustej mapy).
+                            coinBlacklist[nearestCoin] = math.huge
                             farmStuckCoin, farmStuckClock = nil, 0
                         end
                     else
@@ -3388,6 +3596,10 @@ function startMainScript()
                         end
                     end
                     if knife then
+                        -- Auto Kill All ma PRIORYTET nad farmami: flaga
+                        -- killBusy pauzuje Auto Farm i TP Farm (oraz Auto TP
+                        -- Gun), żeby nie odbijały postaci od celu zabójstwa
+                        killBusy = true
                         for _, target in pairs(playersService:GetPlayers()) do
                             if not autoKillAll then break end
                             if isTargetValid(target) then
@@ -3398,6 +3610,9 @@ function startMainScript()
                                 task.wait(0.2)
                             end
                         end
+                        -- skasuj flagę zawsze (także po break), bo inaczej
+                        -- farmy zostałyby zablokowane na stałe
+                        killBusy = false
                     end
                 end
             end
@@ -3664,15 +3879,25 @@ function startMainScript()
     end)
 
     runService.RenderStepped:Connect(function()
-        if autoGunTP and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
+        -- Auto TP Gun działa TYLKO dla żywego nie-mordercy: morderca ma nóż
+        -- i rewolwer mu niepotrzebny, a martwej postaci nie teleportujemy w ogóle.
+        -- Warunki sprawdzamy co klatkę, żeby reagować na śmierć/zmianę roli.
+        local hum = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
+        local zywyNieMorderca = hum and hum.Health > 0 and getRole(plr) ~= "Murderer"
+        if autoGunTP and zywyNieMorderca and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
             local hrp = plr.Character.HumanoidRootPart
             local gunDrop = workspace:FindFirstChild("GunDrop", true)
+            -- gunDropRef = widok dla farm: broń leży na ziemi, więc Auto Farm
+            -- i TP Farm pauzują (i tak już pauzuje je killBusy w trakcie zabójstwa)
+            gunDropRef = gunDrop
             if gunDrop then
                 if not isTeleporting then
                     originalPos = hrp.CFrame
                     isTeleporting = true
                 end
-                hrp.CFrame = gunDrop.CFrame + Vector3.new(0, 1, 0)
+                if not killBusy then
+                    hrp.CFrame = gunDrop.CFrame + Vector3.new(0, 1, 0)
+                end
             else
                 if isTeleporting then
                     if originalPos then hrp.CFrame = originalPos end
@@ -3680,6 +3905,12 @@ function startMainScript()
                     originalPos = nil
                 end
             end
+        else
+            -- martwy / morderca / respawn: kasujemy stan BEZ powrotu do oldPos
+            -- (trupa i mordercy nie przenosimy), a farmom znika pauza przez gunDropRef
+            gunDropRef = nil
+            isTeleporting = false
+            originalPos = nil
         end
     end)
 
@@ -3943,6 +4174,9 @@ function startBsEspNew(getOn)
             if hl then hl:Destroy() end
             local bb = t.a and t.a:FindFirstChild("BsEspBB")
             if bb then bb:Destroy() end
+            -- ramka jest przypięta do kotwicy (nie do modelu), więc osobno
+            local bx = t.a and t.a:FindFirstChild("BsEspBox")
+            if bx then bx:Destroy() end
         end
         targets = {}
     end
@@ -3954,13 +4188,21 @@ function startBsEspNew(getOn)
         for _, c in ipairs(cf0:GetChildren()) do
             local hl = c:FindFirstChild("BsEspHL")
             if hl then hl:Destroy() end
-            local h = c:FindFirstChild("Head")
+            local h = c:FindFirstChild("Head") or c:FindFirstChild("HumanoidRootPart")
             local bb = h and h:FindFirstChild("BsEspBB")
             if bb then bb:Destroy() end
+            local bx = h and h:FindFirstChild("BsEspBox")
+            if bx then bx:Destroy() end
         end
     end
 
-    RS.RenderStepped:Connect(function()
+    -- BindToRenderStep z priorytetem POWYŻEJ kamery, nie zwykły
+    -- RenderStepped: ESP musi dopisać rozmiary/kolory po grze i po
+    -- własnych pętlach huba. Przy zwykłym RenderStepped starsza pętla
+    -- (np. z poprzedniej injekcji, jeszcze żyjąca) nadpisywała wartości
+    -- w tej samej klatce i ramka wracała do starych, wadliwych rozmiarów.
+    RS:UnbindFromRenderStep("SzpontHubBsEsp")
+    RS:BindToRenderStep("SzpontHubBsEsp", Enum.RenderPriority.Camera.Value + 10, function()
         local getter = _G.__liptonBsEspGetter
         if not (getter and getter()) then
             if #targets > 0 then clearAll() end
@@ -4006,9 +4248,61 @@ function startBsEspNew(getOn)
                     hl.Adornee = m
                     hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
                     hl.FillColor = color
-                    hl.FillTransparency = 0.55
+                    -- 0.55 było niezauważalne: przy wrogach 100-250 m (a w
+                    -- BloxStrike kamera bywa Scriptable/spectator) fill dawał
+                    -- kilka ledwo widocznych pikseli. 0.28 = wyraźna sylwetka
+                    -- przez ściany, dalej widać kto jest kto.
+                    hl.FillTransparency = 0.28
                     hl.OutlineColor = Color3.fromRGB(255, 255, 255)
                     hl.OutlineTransparency = 0
+
+                    -- RAMKA WOKÓŁ POSTACI (GUI, nie Highlight).
+                    -- Dlaczego GUI: Highlight sam w sobie był dla użytkownika
+                    -- niezauważalny, a BillboardGui + UIStroke rysuje się tą
+                    -- samą ścieżką co nasze nazwy nad głowami, które w tej
+                    -- grze działają. Rozmiar podany w STUDSACH, więc ramka
+                    -- trzyma się sylwetki niezależnie od dystansu (im dalej,
+                    -- tym mniejsza — jak prawdziwy box ESP), a AlwaysOnTop
+                    -- daje widzenie przez ściany.
+                    local bx = a:FindFirstChild("BsEspBox")
+                    if not bx then
+                        bx = Instance.new("BillboardGui")
+                        bx.Name = "BsEspBox"
+                        bx.Parent = a
+                        bx.ResetOnSpawn = false
+                        bx.AlwaysOnTop = true
+                        bx.LightInfluence = 0
+                        local fr = Instance.new("Frame")
+                        fr.Name = "BsEspBoxFrame"
+                        fr.Parent = bx
+                        fr.BackgroundTransparency = 1
+                        fr.Size = UDim2.new(1, 0, 1, 0)
+                        local st = Instance.new("UIStroke")
+                        st.Name = "BsEspStroke"
+                        st.Parent = fr
+                        st.Thickness = 2.5
+                        st.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+                    end
+                    -- ROZMIAR W PIKSELACH, LICZONY Z DYSTANSU.
+                    -- WAŻNE: offset UDim2 w BillboardGui to PIKSELE, nie
+                    -- study — wcześniejsze 3.4 x 6.4 dało ramkę 3x6 px, czyli
+                    -- niewidoczną kropkę (stąd "ESP nie podświetla"). Rozmiar
+                    -- bierzemy z rzutu pinhole: px = stud * (wys. ekranu / 2) /
+                    -- (tg(fov/2) * dystans), więc ramka trzyma się sylwetki i
+                    -- przy 5 m, i przy 350 m (kamera w BS bywa spectatorem).
+                    local dystans = (a.Position - cam.CFrame.Position).Magnitude
+                    local pxPerStud = (cam.ViewportSize.Y * 0.5)
+                        / (math.tan(math.rad(cam.FieldOfView) * 0.5) * math.max(dystans, 1))
+                    bx.Size = UDim2.fromOffset(
+                        math.clamp(2.6 * pxPerStud, 26, 900),
+                        math.clamp(5.8 * pxPerStud, 52, 1600))
+                    -- Kotwica to Head (góra sylwetki), a pivot modelu leży
+                    -- mniej więcej w środku — przesuwamy ramkę o różnicę.
+                    bx.StudsOffset = Vector3.new(
+                        0, m:GetPivot().Position.Y - a.Position.Y, 0)
+                    local frBox = bx:FindFirstChild("BsEspBoxFrame")
+                    local stBox = frBox and frBox:FindFirstChild("BsEspStroke")
+                    if stBox then stBox.Color = color end
 
                     local bb = a:FindFirstChild("BsEspBB")
                     if not bb then
@@ -5461,6 +5755,11 @@ function startBloxStrikeScript()
     -- Dlatego wrapper/redirect maja setfenv na PUSTY env (wszystko to upvaly),
     -- przy starcie weryfikujemy env; gdyby setfenv nie dzialal — nie
     -- instalujemy nic (zero ryzyka dla gry).
+    -- BLOK LOKALNY (do ... end): limit Luau to 200 lokalnych rejestrów na
+    -- funkcję. Ta maszyna SILENT AIM deklaruje ~55 lokalnych i startBloxStrikeScript
+    -- dobijał do limitu → "Out of local registers ... exceeded limit 200".
+    -- Blok zwalnia rejestry po swoim końcu, logika i setfenv bez zmian.
+    do
     local G = _G
     -- TRZY NIEZALEZNE SILENT AIMY: każdy przełącznik działa samodzielnie
     -- (bez wymuszania Silent Aima → Wallbang → TP Shot po kolei),
@@ -6586,6 +6885,7 @@ function startBloxStrikeScript()
     else
         warn("[SzpontHub] BS Silent Aim: env check autofire nie przeszedł — Heartbeat trigger NIE podłączony")
     end
+    end -- koniec bloku SILENT AIM (zwalnia lokalne rejestry)
 
     -- BUNNY HOP v5 — jedyne źródło skoku w BloxStrike.
     -- Gra NIE używa stanów Humanoida: postacią steruje własna symulacja
