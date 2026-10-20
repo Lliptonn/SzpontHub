@@ -37,6 +37,27 @@ local function getTargetGui()
     return plr and plr:WaitForChild("PlayerGui", 10) or game:GetService("CoreGui")
 end
 
+------------------------------------------------------------
+-- BEZPIECZNY DOSTĘP DO POSTACI
+-- Przy respawnie model postaci jest PODMIENIANY: stary Model znika,
+-- a nowy przez chwilę nie ma HumanoidRootPart/Humanoid. Wtedy
+-- plr.Character.HumanoidRootPart rzuca
+-- "HumanoidRootPart is not a valid member of Model ..." i wywala skrypt.
+-- Dlatego NIGDY nie sięgamy po te pola bezpośrednio — tylko przez te
+-- gettery (FindFirstChild + kontrola typu = nil zamiast wyjątku).
+------------------------------------------------------------
+local function getHRP(model)
+    if not model then return nil end
+    local h = model:FindFirstChild("HumanoidRootPart")
+    if h and h:IsA("BasePart") then return h end
+    return nil
+end
+
+local function getHum(model)
+    if not model then return nil end
+    return model:FindFirstChildOfClass("Humanoid")
+end
+
 local targetParent = getTargetGui()
 
 pcall(function()
@@ -570,13 +591,27 @@ function startMainScript()
                         -- Lua ma limit 200 rejestrów na chunk)
 
     -- AUTO FARM: progi bezpieczeństwa (opis w sekcji AUTO FARM COINS v3)
-    -- FARM_SAFE_SPEED_CAP: MM2 kopało "Invalid position" (Error 267) powyżej
-    -- ~25-30 studs/sek, więc suwak może pokazywać więcej, ale tyle realnie
-    -- jedzie postać. Chcesz testować szybciej — podnieś tę wartość.
-    local FARM_SAFE_SPEED_CAP = 24
-    local FARM_MAX_STEP = 0.7       -- twardy limit kroku na tick (studs)
+    -- FARM_SAFE_SPEED_CAP: górna granica suwaka prędkości farmy. Wcześniej
+    -- stała tu 24 i dlatego suwak "Farm Speed" NIC NIE ROBIŁ powyżej 25 —
+    -- farma i tak jechała 24 studs/s. Teraz suwak jest HONOROWANY w całym
+    -- zakresie 5-100.
+    -- UWAGA: ruch farmy idzie przez CFrame, a MM2 odrzuca ("Invalid position",
+    -- Error 267) skoki powyżej ~25-30 studs/s. Dlatego:
+    --   * powyżej 30 studs/s dostajesz ostrzeżenie w etykiecie suwaka,
+    --   * FARM_MAX_STEP limituje krok na tick, żeby po lagu nie było skoku,
+    --   * jeśli dostaniesz kicka — obniż suwak albo użyj TP Farm (on jedzie
+    --     WalkSpeed'em i ~200 studs/s przechodzi bez problemu).
+    local FARM_SAFE_SPEED_CAP = 100
+    local FARM_KICK_RISK_SPEED = 30   -- od tej wartości serwer może odmówić
+    local FARM_MAX_STEP = 2.0         -- twardy limit kroku na tick (studs)
     local FARM_DT_CLAMP = 0.05      -- lag > 50 ms liczymy jako 50 ms
     local FARM_STUCK_TIME = 3       -- sekundy stania przy monecie bez efektu
+    local FARM_BLACKLIST_TIME = 20  -- jak długo moneta jest ignorowana po "stuck"
+    -- PANIKA: bliżej niż ta odległość (studów) morderca jest ZA BLISKO —
+    -- farma rzuca cukierki i ucieka. Dalej (aż do suwaka "Murder Dist")
+    -- farma dalej ZBIERA, tylko kierunek ruchu jest mieszany z ucieczką.
+    -- Stary kod uciekał odrazu i przez to NIE ZBIERAŁ NIC (same ucieczki).
+    local FARM_PANIC_DIST = 8
     local FARM_SCAN_INTERVAL = 1    -- odświeżenie listy żywych monet (s)
     local FARM_EMPTY_SCAN_INTERVAL = 0.75 -- rzadsze odświeżenie, gdy lista pusta
     local FARM_TARGET_RANGE = 200   -- ignorujemy monety dalej niż X studs
@@ -619,6 +654,7 @@ function startMainScript()
         walk = 200,   -- WalkSpeed używany PODCZAS "teleportu" (ruch chodzeniem)
         nextAt = 0,   -- kiedy następny teleport
         scanAt = 0,   -- kiedy odświeżyć listę monet
+        walking = false, -- true w trakcie chodzenia do monety (Auto Farm wstrzymuje się)
         ui = {},      -- przycisk/etykieta/suwak (uzupełniane niżej)
     }
 
@@ -657,48 +693,69 @@ function startMainScript()
         }
     }
 
-    -- GUI
+    -- GUI (v2): okno DUŻE, zakładki PO LEWEJ (pasek boczny), treść w prawej
+    -- kolumnie. Baza czarno-biała, akcent animowany (pętla RenderStepped).
     local g = Instance.new("ScreenGui")
     g.Name = "LiptonHubHack"
     g.ResetOnSpawn = false
     g.Parent = targetParent
 
+    -- stan animacji akcentu (hue płynie, clock odświeża malowanie)
+    local accentAnim = { hue = 0, clock = 0 }
+
     local mainFrame = Instance.new("Frame")
-    mainFrame.Size = UDim2.new(0, 240, 0, 560)
-    mainFrame.Position = UDim2.new(0.5, -120, 0.5, -280)
+    mainFrame.Size = UDim2.new(0, 540, 0, 620)
+    mainFrame.Position = UDim2.new(0.5, -270, 0.5, -310)
     mainFrame.BackgroundColor3 = themes[currentTheme].Dark
-    mainFrame.BackgroundTransparency = 0.15
-    mainFrame.BorderSizePixel = 2
+    mainFrame.BackgroundTransparency = 0.05
+    mainFrame.BorderSizePixel = 1
     mainFrame.BorderColor3 = themes[currentTheme].Primary
     mainFrame.Active = true
     mainFrame.Draggable = true
     mainFrame.Visible = true
     mainFrame.Parent = g
+    do
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0, 10)
+        c.Parent = mainFrame
+    end
 
     local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, -50, 0, 35)
-    title.BackgroundColor3 = themes[currentTheme].Primary
-    title.BackgroundTransparency = 0.2
+    title.Size = UDim2.new(1, 0, 0, 44)
+    title.BackgroundTransparency = 1
     title.BorderSizePixel = 0
-    title.Text = "🔥 LiptonHub 🔥"
-    title.TextColor3 = Color3.fromRGB(255, 255, 255)
-    title.TextSize = 16
-    title.Font = Enum.Font.SourceSansBold
+    title.Text = "LIPTONHUB"
+    title.TextColor3 = Color3.fromRGB(250, 250, 250)
+    title.TextSize = 22
+    title.Font = Enum.Font.GothamBold
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Position = UDim2.new(0, 18, 0, 0)
     title.ZIndex = 2
     title.Parent = mainFrame
 
+    -- cienka linia akcentu pod paskiem tytułu (kolor animuje paintTheme)
+    do
+        local line = Instance.new("Frame")
+        line.Name = "TitleLine"
+        line.Size = UDim2.new(1, 0, 0, 2)
+        line.Position = UDim2.new(0, 0, 0, 43)
+        line.BackgroundColor3 = themes[currentTheme].Primary
+        line.BorderSizePixel = 0
+        line.ZIndex = 2
+        line.Parent = mainFrame
+    end
+
     -- PRZYCISK: powrót do wyboru gry (obok tytułu)
     local backBtn = Instance.new("TextButton")
-    backBtn.Size = UDim2.new(0, 46, 0, 25)
-    backBtn.Position = UDim2.new(1, -48, 0, 5)
-    backBtn.BackgroundColor3 = Color3.fromRGB(200, 40, 40)
-    backBtn.BackgroundTransparency = 0.1
-    backBtn.BorderSizePixel = 1
-    backBtn.BorderColor3 = Color3.fromRGB(255, 255, 255)
-    backBtn.Text = "←"
-    backBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    backBtn.TextSize = 15
-    backBtn.Font = Enum.Font.SourceSansBold
+    backBtn.Size = UDim2.new(0, 46, 0, 26)
+    backBtn.Position = UDim2.new(1, -58, 0, 9)
+    backBtn.BackgroundColor3 = themes[currentTheme].ButtonBg
+    backBtn.BackgroundTransparency = 0
+    backBtn.BorderSizePixel = 0
+    backBtn.Text = "<"
+    backBtn.TextColor3 = Color3.fromRGB(240, 240, 240)
+    backBtn.TextSize = 16
+    backBtn.Font = Enum.Font.GothamBold
     backBtn.ZIndex = 3
     backBtn.Parent = mainFrame
 
@@ -728,6 +785,32 @@ function startMainScript()
     -- STARY scrollFrame zostaje ukryty i pusty (updateTheme dalej go koloruje)
     scrollFrame.Visible = false
 
+    -- LEWY PASER ZAKŁADEK (nowa budowa: zakładki w kolumnie, nie u góry)
+    local sidebar = Instance.new("Frame")
+    sidebar.Size = UDim2.new(0, 150, 1, -45)
+    sidebar.Position = UDim2.new(0, 0, 0, 45)
+    sidebar.BackgroundColor3 = themes[currentTheme].Dark
+    sidebar.BackgroundTransparency = 0.3
+    sidebar.BorderSizePixel = 0
+    sidebar.ZIndex = 2
+    sidebar.Parent = mainFrame
+    do
+        local sl = Instance.new("UIListLayout")
+        sl.Padding = UDim.new(0, 6)
+        sl.SortOrder = Enum.SortOrder.LayoutOrder
+        sl.HorizontalAlignment = Enum.HorizontalAlignment.Center
+        sl.Parent = sidebar
+    end
+
+    -- PRAWA KOLUMNA: TREŚĆ (strony zakładek)
+    local contentArea = Instance.new("Frame")
+    contentArea.Size = UDim2.new(1, -150, 1, -45)
+    contentArea.Position = UDim2.new(0, 150, 0, 45)
+    contentArea.BackgroundTransparency = 1
+    contentArea.BorderSizePixel = 0
+    contentArea.ZIndex = 1
+    contentArea.Parent = mainFrame
+
     -- ZAKŁADKI: Combat / Movement / Utility / Visuals
     local pageNames = {"Combat", "Movement", "Utility", "Visuals"}
     local pages = {}
@@ -736,20 +819,20 @@ function startMainScript()
 
     local function makePage(name)
         local pg = Instance.new("ScrollingFrame")
-        pg.Size = UDim2.new(0.9, 0, 0, 478)
-        pg.Position = UDim2.new(0.05, 0, 0, 64)
+        pg.Size = UDim2.new(1, -20, 1, -20)
+        pg.Position = UDim2.new(0, 10, 0, 10)
         pg.BackgroundTransparency = 1
         pg.BorderSizePixel = 0
         pg.CanvasSize = UDim2.new(0, 0, 0, 0)
         pg.AutomaticCanvasSize = Enum.AutomaticSize.Y
-        pg.ScrollBarThickness = 4
+        pg.ScrollBarThickness = 5
         pg.ScrollBarImageColor3 = themes[currentTheme].Primary
         pg.ZIndex = 2
         pg.Visible = (name == activeTab)
-        pg.Parent = mainFrame
+        pg.Parent = contentArea
 
         local pgLayout = Instance.new("UIListLayout")
-        pgLayout.Padding = UDim.new(0, 5)
+        pgLayout.Padding = UDim.new(0, 6)
         pgLayout.SortOrder = Enum.SortOrder.LayoutOrder
         pgLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
         pgLayout.Parent = pg
@@ -762,29 +845,28 @@ function startMainScript()
         for n, pg in pairs(pages) do
             pg.Visible = (n == name)
         end
+        local t = themes[currentTheme]
         for n, tb in pairs(tabButtons) do
             local isActive = (n == name)
-            tb.BackgroundColor3 = isActive and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
-            tb.BackgroundTransparency = isActive and 0.05 or 0.2
+            tb.BackgroundColor3 = isActive and t.Primary or t.ButtonBg
+            tb.TextColor3 = isActive and t.Dark or Color3.fromRGB(235, 235, 235)
         end
     end
 
     for i, tabName in ipairs(pageNames) do
         makePage(tabName)
         local tb = Instance.new("TextButton")
-        tb.Size = UDim2.new(0, 55, 0, 24)
-        tb.Position = UDim2.new(0, 3 + (i - 1) * 58, 0, 37)
+        tb.Size = UDim2.new(0, 134, 0, 36)
         tb.BackgroundColor3 = themes[currentTheme].ButtonBg
-        tb.BackgroundTransparency = 0.2
-        tb.BorderSizePixel = 1
-        tb.BorderColor3 = themes[currentTheme].Primary
+        tb.BackgroundTransparency = 0
+        tb.BorderSizePixel = 0
         tb.Text = tabName
-        tb.TextColor3 = Color3.fromRGB(255, 255, 255)
-        tb.TextSize = 11
-        tb.Font = Enum.Font.SourceSansBold
-        tb.TextTruncate = Enum.TextTruncate.AtEnd
+        tb.TextColor3 = Color3.fromRGB(235, 235, 235)
+        tb.TextSize = 14
+        tb.Font = Enum.Font.GothamSemibold
+        tb.LayoutOrder = i
         tb.ZIndex = 3
-        tb.Parent = mainFrame
+        tb.Parent = sidebar
         tabButtons[tabName] = tb
         tb.MouseButton1Click:Connect(function()
             selectTab(tabName)
@@ -1168,32 +1250,21 @@ function startMainScript()
     -- trafiłoby do globala (nil) i wywaliłoby się przy pierwszym kliknięciu
     local loadSkins, tryApplySelected, restoreOriginals, addToInventory, refreshInjected, applyFilter
 
-    -- suwak zakładek: 5 przycisków musi zmieścić się w menu szerokim na 240 px
-    -- (stare 4 miały 55 px ze skokiem 58 = koniec na 232 px, piąty by wypadł)
-    local tabW, tabGap = 45, 47
-    for i, name in ipairs({ "Combat", "Movement", "Utility", "Visuals" }) do
-        local tb = tabButtons[name]
-        if tb then
-            tb.Size = UDim2.new(0, tabW, 0, 24)
-            tb.Position = UDim2.new(0, 3 + (i - 1) * tabGap, 0, 37)
-            tb.TextSize = 10
-        end
-    end
+    -- Zakładka "Skins" idzie do lewego paska (UIListLayout ustawia pozycje
+    -- automatycznie — wystarczy LayoutOrder, bez ręcznych Position).
     makePage("Skins")
     tbSkins = Instance.new("TextButton")
-    tbSkins.Size = UDim2.new(0, tabW, 0, 24)
-    tbSkins.Position = UDim2.new(0, 3 + 4 * tabGap, 0, 37)
+    tbSkins.Size = UDim2.new(0, 134, 0, 36)
     tbSkins.BackgroundColor3 = themes[currentTheme].ButtonBg
-    tbSkins.BackgroundTransparency = 0.2
-    tbSkins.BorderSizePixel = 1
-    tbSkins.BorderColor3 = themes[currentTheme].Primary
+    tbSkins.BackgroundTransparency = 0
+    tbSkins.BorderSizePixel = 0
     tbSkins.Text = "Skins"
-    tbSkins.TextColor3 = Color3.fromRGB(255, 255, 255)
-    tbSkins.TextSize = 10
-    tbSkins.Font = Enum.Font.SourceSansBold
-    tbSkins.TextTruncate = Enum.TextTruncate.AtEnd
+    tbSkins.TextColor3 = Color3.fromRGB(235, 235, 235)
+    tbSkins.TextSize = 14
+    tbSkins.Font = Enum.Font.GothamSemibold
+    tbSkins.LayoutOrder = 5
     tbSkins.ZIndex = 3
-    tbSkins.Parent = mainFrame
+    tbSkins.Parent = sidebar
     tabButtons["Skins"] = tbSkins
 
     local function rarityColor(name)
@@ -2247,30 +2318,42 @@ function startMainScript()
     mm2CheatsGui = activeCheatsGui
 
     local cheatsPanel = Instance.new("Frame")
-    cheatsPanel.Size = UDim2.new(0, 200, 1, -330)
-    cheatsPanel.Position = UDim2.new(1, -210, 0, 325)
+    cheatsPanel.Size = UDim2.new(0, 230, 1, -330)
+    cheatsPanel.Position = UDim2.new(1, -240, 0, 325)
     cheatsPanel.BackgroundColor3 = themes[currentTheme].Dark
-    cheatsPanel.BackgroundTransparency = 0.3
-    cheatsPanel.BorderSizePixel = 2
+    cheatsPanel.BackgroundTransparency = 0.15
+    cheatsPanel.BorderSizePixel = 1
     cheatsPanel.BorderColor3 = themes[currentTheme].Primary
     cheatsPanel.Active = false
     cheatsPanel.Draggable = false
     cheatsPanel.Parent = activeCheatsGui
+    do
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0, 10)
+        c.Parent = cheatsPanel
+    end
 
     local cheatsTitle = Instance.new("TextLabel")
-    cheatsTitle.Size = UDim2.new(1, 0, 0, 28)
+    cheatsTitle.Size = UDim2.new(1, 0, 0, 32)
     cheatsTitle.BackgroundColor3 = themes[currentTheme].Primary
-    cheatsTitle.BackgroundTransparency = 0.2
+    cheatsTitle.BackgroundTransparency = 0
     cheatsTitle.BorderSizePixel = 0
-    cheatsTitle.Text = "🔥 LiptonHub List 🔥"
-    cheatsTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
-    cheatsTitle.TextSize = 13
-    cheatsTitle.Font = Enum.Font.SourceSansBold
+    cheatsTitle.Text = "ACTIVE"
+    cheatsTitle.TextColor3 = themes[currentTheme].Dark
+    cheatsTitle.TextSize = 14
+    cheatsTitle.Font = Enum.Font.GothamBold
+    cheatsTitle.TextXAlignment = Enum.TextXAlignment.Left
+    cheatsTitle.Position = UDim2.new(0, 0, 0, 0)
     cheatsTitle.Parent = cheatsPanel
+    do
+        local pad = Instance.new("UIPadding")
+        pad.PaddingLeft = UDim.new(0, 12)
+        pad.Parent = cheatsTitle
+    end
 
     local cheatsScroll = Instance.new("ScrollingFrame")
-    cheatsScroll.Size = UDim2.new(0.95, 0, 0.92, 0)
-    cheatsScroll.Position = UDim2.new(0.025, 0, 0.07, 0)
+    cheatsScroll.Size = UDim2.new(0.95, 0, 1, -44)
+    cheatsScroll.Position = UDim2.new(0.025, 0, 0, 40)
     cheatsScroll.BackgroundTransparency = 1
     cheatsScroll.BorderSizePixel = 0
     cheatsScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
@@ -2279,7 +2362,7 @@ function startMainScript()
     cheatsScroll.Parent = cheatsPanel
 
     local cheatsListLayout = Instance.new("UIListLayout")
-    cheatsListLayout.Padding = UDim.new(0, 3)
+    cheatsListLayout.Padding = UDim.new(0, 4)
     cheatsListLayout.SortOrder = Enum.SortOrder.LayoutOrder
     cheatsListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
     cheatsListLayout.Parent = cheatsScroll
@@ -2305,7 +2388,7 @@ function startMainScript()
         if autoKillAll then table.insert(activeList, "• Auto Kill All") end
         if autoKillMurder then table.insert(activeList, "• Auto Kill Murder") end
         if flingTargetEnabled then table.insert(activeList, "• Fling: " .. (targetPlayerName or "Brak")) end
-        if autoFarmCoins then table.insert(activeList, "• Auto Farm Coins") end
+        if autoFarmCoins then table.insert(activeList, "• Auto Farm Coins (" .. farmSpeed .. " studs/s)") end
         if tp.on then table.insert(activeList, "• TP Farm (" .. string.format("%.1f", tp.sec) .. "s)") end
         if antiFling then table.insert(activeList, "• Anti-Fling") end
         if antiAfk then table.insert(activeList, "• Anti-AFK") end
@@ -2316,19 +2399,26 @@ function startMainScript()
 
         for i, cheatName in ipairs(activeList) do
             local lbl = Instance.new("TextLabel")
-            lbl.Size = UDim2.new(0.95, 0, 0, 22)
+            lbl.Size = UDim2.new(0.92, 0, 0, 26)
             lbl.BackgroundColor3 = themes[currentTheme].ButtonBg
-            lbl.BackgroundTransparency = 0.4
+            lbl.BackgroundTransparency = 0
             lbl.BorderSizePixel = 0
             lbl.TextColor3 = themes[currentTheme].TextCol
             lbl.TextSize = 12
-            lbl.Font = Enum.Font.SourceSansBold
-            lbl.Text = cheatName
+            lbl.Font = Enum.Font.Gotham
+            lbl.TextXAlignment = Enum.TextXAlignment.Left
+            lbl.Text = "  " .. cheatName
             lbl.LayoutOrder = i
+            lbl.ZIndex = 26
             lbl.Parent = cheatsScroll
+            do
+                local c = Instance.new("UICorner")
+                c.CornerRadius = UDim.new(0, 6)
+                c.Parent = lbl
+            end
         end
 
-        cheatsScroll.CanvasSize = UDim2.new(0, 0, 0, #activeList * 25)
+        cheatsScroll.CanvasSize = UDim2.new(0, 0, 0, #activeList * 30)
     end
 
     local playerListFrame = Instance.new("ScrollingFrame")
@@ -2401,36 +2491,90 @@ function startMainScript()
     themeListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
     themeListLayout.Parent = themeListFrame
 
-    local function updateTheme(themeName)
-        if not themes[themeName] then return end
-        currentTheme = themeName
-        bThemeToggle.Text = "Theme: " .. themeName
+    -- NOWY WYGLĄD: rozmiary, fonty, zaokrąglenia (jednorazowo przy tworzeniu
+    -- GUI i po zmianie motywu). Kolory ma malować paintTheme.
+    local function modernize()
+        for _, btn in ipairs(allButtons) do
+            btn.Size = UDim2.new(0.84, 0, 0, 30)
+            btn.BackgroundTransparency = 0
+            btn.BorderSizePixel = 0
+            btn.Font = Enum.Font.GothamSemibold
+            btn.TextSize = 13
+            btn.TextXAlignment = Enum.TextXAlignment.Left
+            if not btn:FindFirstChildOfClass("UICorner") then
+                local c = Instance.new("UICorner")
+                c.CornerRadius = UDim.new(0, 6)
+                c.Parent = btn
+            end
+            local pad = btn:FindFirstChildOfClass("UIPadding")
+            if not pad then
+                pad = Instance.new("UIPadding")
+                pad.Parent = btn
+            end
+            pad.PaddingLeft = UDim.new(0, 10)
+        end
+        for _, sl in ipairs(allSliders) do
+            sl.Size = UDim2.new(0.84, 0, 0, 8)
+            sl.BorderSizePixel = 0
+            sl.BackgroundColor3 = themes[currentTheme].Dark
+            if not sl:FindFirstChildOfClass("UICorner") then
+                local c = Instance.new("UICorner")
+                c.CornerRadius = UDim.new(1, 0)
+                c.Parent = sl
+            end
+        end
+        for _, lbl in ipairs(allLabels) do
+            lbl.Size = UDim2.new(0.84, 0, 0, 14)
+            lbl.Font = Enum.Font.Gotham
+            lbl.TextSize = 12
+            lbl.TextXAlignment = Enum.TextXAlignment.Left
+        end
+    end
 
-        local t = themes[themeName]
+    -- MALOWANIE KOLORÓW: osobno od modernize(), bo animacja akcentu
+    -- przemalowuje GUI co 0.1 s i nie chce co klatkę ruszać rozmiarów.
+    local function paintTheme()
+        local t = themes[currentTheme]
+        local primary = t.Primary
+
         mainFrame.BackgroundColor3 = t.Dark
-        mainFrame.BorderColor3 = t.Primary
-        title.BackgroundColor3 = t.Primary
-        scrollFrame.ScrollBarImageColor3 = t.Primary
+        mainFrame.BorderColor3 = primary
+        title.TextColor3 = Color3.fromRGB(250, 250, 250)
+        -- linia akcentu pod tytułem (animowana razem z motywem)
+        local titleLine = mainFrame:FindFirstChild("TitleLine")
+        if titleLine then titleLine.BackgroundColor3 = primary end
+        scrollFrame.ScrollBarImageColor3 = primary
 
         cheatsPanel.BackgroundColor3 = t.Dark
-        cheatsPanel.BorderColor3 = t.Primary
-        cheatsTitle.BackgroundColor3 = t.Primary
-        cheatsScroll.ScrollBarImageColor3 = t.Primary
+        cheatsPanel.BorderColor3 = primary
+        cheatsTitle.BackgroundColor3 = primary
+        cheatsTitle.TextColor3 = t.Dark
+        cheatsScroll.ScrollBarImageColor3 = primary
 
         for _, btn in ipairs(allButtons) do
-            btn.BorderColor3 = t.Primary
-            if btn.BackgroundColor3 ~= t.Primary and btn ~= bThemeToggle then
+            btn.BorderColor3 = primary
+            -- przycisk w stanie ON ma kolor akcentu (odkrywamy to po
+            -- kolorze, bo przełączniki ustawiają go ręcznie)
+            local c = btn.BackgroundColor3
+            local isOn = math.abs(c.R - primary.R) < 0.1
+                and math.abs(c.G - primary.G) < 0.1
+                and math.abs(c.B - primary.B) < 0.1
+            if btn == bThemeToggle or isOn then
+                btn.BackgroundColor3 = primary
+                btn.TextColor3 = t.Dark
+            else
                 btn.BackgroundColor3 = t.ButtonBg
+                btn.TextColor3 = Color3.fromRGB(235, 235, 235)
             end
         end
 
         for _, sl in ipairs(allSliders) do
             sl.BackgroundColor3 = t.Dark
-            sl.BorderColor3 = t.Primary
+            sl.BorderColor3 = primary
         end
 
         for _, frm in ipairs(allFrames) do
-            frm.BackgroundColor3 = t.Primary
+            frm.BackgroundColor3 = primary
         end
 
         for _, lbl in ipairs(allLabels) do
@@ -2438,47 +2582,80 @@ function startMainScript()
         end
 
         playerListFrame.BackgroundColor3 = t.Dark
-        playerListFrame.BorderColor3 = t.Primary
-        playerListFrame.ScrollBarImageColor3 = t.Primary
+        playerListFrame.BorderColor3 = primary
+        playerListFrame.ScrollBarImageColor3 = primary
 
         themeListFrame.BackgroundColor3 = t.Dark
-        themeListFrame.BorderColor3 = t.Primary
-        themeListFrame.ScrollBarImageColor3 = t.Primary
+        themeListFrame.BorderColor3 = primary
+        themeListFrame.ScrollBarImageColor3 = primary
 
         -- Przemalowanie paska zakładek i stron po zmianie motywu
         for n, tb in pairs(tabButtons) do
             local isActive = (n == activeTab)
-            tb.BackgroundColor3 = isActive and t.Primary or t.ButtonBg
-            tb.BackgroundTransparency = isActive and 0.05 or 0.2
-            tb.BorderColor3 = t.Primary
+            tb.BackgroundColor3 = isActive and primary or t.ButtonBg
+            tb.TextColor3 = isActive and t.Dark or Color3.fromRGB(235, 235, 235)
+            tb.BorderColor3 = primary
         end
         for _, pg in pairs(pages) do
-            pg.ScrollBarImageColor3 = t.Primary
+            pg.ScrollBarImageColor3 = primary
         end
+    end
 
+    local function updateTheme(themeName)
+        if not themes[themeName] then return end
+        currentTheme = themeName
+        bThemeToggle.Text = "Theme: " .. themeName
+        modernize()
+        paintTheme()
         updateActiveCheatsList()
     end
 
-    local themeNames = {"Orange", "Red", "Purple", "Yellow", "Blue"}
+    -- ANIMOWANY AKCENT (motyw Mono): hue płynie w tę, baza zostaje
+    -- czarno-biała. Malowanie co 0.1 s (GUI ma ~100 elementów, co klatkę
+    -- to marnowanie klatek). W innych motywach kolory są statyczne.
+    runService.RenderStepped:Connect(function(dt)
+        if currentTheme == "Mono" then
+            accentAnim.hue = (accentAnim.hue + dt * 0.07) % 1
+            themes.Mono.Primary = Color3.fromHSV(accentAnim.hue, 0.12, 1)
+        end
+        accentAnim.clock = accentAnim.clock + dt
+        if accentAnim.clock >= 0.1 then
+            accentAnim.clock = 0
+            paintTheme()
+        end
+    end)
+
+    local themeNames = {"Mono", "Orange", "Red", "Purple", "Yellow", "Blue"}
     for i, tName in ipairs(themeNames) do
         local tBtn = Instance.new("TextButton")
-        tBtn.Size = UDim2.new(0.95, 0, 0, 32)
+        tBtn.Size = UDim2.new(0.9, 0, 0, 30)
         tBtn.BackgroundColor3 = themes[tName].Primary
-        tBtn.BorderColor3 = Color3.fromRGB(255, 255, 255)
-        tBtn.BorderSizePixel = 1
-        tBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-        tBtn.Font = Enum.Font.SourceSansBold
-        tBtn.TextSize = 14
-        tBtn.Text = "Theme: " .. tName
+        tBtn.BorderSizePixel = 0
+        tBtn.TextColor3 = themes[tName].Dark
+        tBtn.Font = Enum.Font.GothamSemibold
+        tBtn.TextSize = 13
+        tBtn.TextXAlignment = Enum.TextXAlignment.Left
+        tBtn.Text = "  Theme: " .. tName
         tBtn.ZIndex = 26
         tBtn.LayoutOrder = i
         tBtn.Parent = themeListFrame
+        do
+            local c = Instance.new("UICorner")
+            c.CornerRadius = UDim.new(0, 6)
+            c.Parent = tBtn
+        end
+        local pad = Instance.new("UIPadding")
+        pad.PaddingLeft = UDim.new(0, 6)
+        pad.Parent = tBtn
 
         tBtn.MouseButton1Click:Connect(function()
             updateTheme(tName)
             themeListFrame.Visible = false
         end)
     end
+
+    -- PIERWSZE MALOWANIE: dopiero teraz wszystkie elementy GUI istnieją
+    updateTheme(currentTheme)
 
     bThemeToggle.MouseButton1Click:Connect(function()
         playerListFrame.Visible = false
@@ -2498,17 +2675,27 @@ function startMainScript()
         updateActiveCheatsList()
     end)
 
+    -- SPIN PRZY FLINGU: sam fling trwa (gracz musi trafić w cel), a kręcąca
+    -- się postać jest trudniejsza do trafienia. To NIE jest osobna opcja —
+    -- kręcenie włącza się samo przy aktywnym flingu.
+    local FLING_SPIN_SPEED = 70     -- stopnie na klatkę (jak suwak spinbota)
+    local flingSpinAngle = 0        -- kąt kumuluje się sam: CFrame jest co klatkę
+                                     -- nadpisywany pozycją celu, więc nie możemy
+                                     -- mnożyć własnego CFrame (jak spinbot)
+
     runService.Heartbeat:Connect(function()
         if flingTargetEnabled and targetPlayerName then
             local targetPlayer = playersService:FindFirstChild(targetPlayerName)
-            if targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
-                if plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
-                    local myHrp = plr.Character.HumanoidRootPart
-                    local targetHrp = targetPlayer.Character.HumanoidRootPart
-                    myHrp.CFrame = targetHrp.CFrame
-                    myHrp.Velocity = Vector3.new(30000, 30000, 30000)
-                    myHrp.RotVelocity = Vector3.new(20000, 20000, 20000)
-                end
+            -- HRP bierzemy NA BIEŻĄCO (getHRP): przy respawnie model postaci
+            -- bywa chwilowo bez HumanoidRootPart
+            local myHrp = getHRP(plr.Character)
+            local targetHrp = targetPlayer and getHRP(targetPlayer.Character)
+            if myHrp and targetHrp then
+                -- obrót wokół osi Y (pozycja zostaje ta sama, więc fling działa)
+                flingSpinAngle = (flingSpinAngle + FLING_SPIN_SPEED) % 360
+                myHrp.CFrame = targetHrp.CFrame * CFrame.Angles(0, math.rad(flingSpinAngle), 0)
+                myHrp.Velocity = Vector3.new(30000, 30000, 30000)
+                myHrp.RotVelocity = Vector3.new(20000, 20000, 20000)
             end
         end
     end)
@@ -2561,10 +2748,11 @@ function startMainScript()
                 local rel = math.clamp((i.Position.X - sb4.AbsolutePosition.X) / sb4.AbsoluteSize.X, 0, 1)
                 sf4.Size = UDim2.new(rel, 0, 1, 0)
                 farmSpeed = math.floor(5 + rel * 95)
-                -- suwak chodzi 5-100, ale realnie jedzie do FARM_SAFE_SPEED_CAP
-                -- (powyżej progu MM2 kopało "Invalid position") — pokazujemy to
+                -- suwak 5-100 = REALNA prędkość postaci (studs/s). Powyżej
+                -- ~30 serwer może odmówić ruchu ("Invalid position"), więc
+                -- ostrzegamy w etykiecie.
                 sl4.Text = "Farm Speed: " .. farmSpeed
-                    .. (farmSpeed > FARM_SAFE_SPEED_CAP and " (safe " .. FARM_SAFE_SPEED_CAP .. ")" or "")
+                    .. (farmSpeed > FARM_KICK_RISK_SPEED and " (ryzyko kicka)" or "")
             elseif dragging5 then
                 local rel = math.clamp((i.Position.X - sb5.AbsolutePosition.X) / sb5.AbsoluteSize.X, 0, 1)
                 sf5.Size = UDim2.new(rel, 0, 1, 0)
@@ -2590,7 +2778,10 @@ function startMainScript()
                 tp.sec = math.floor((tp.minSec + rel * (tp.maxSec - tp.minSec)) * 10) / 10
                 tp.ui.lbl.Text = "TP Time: " .. string.format("%.1f", tp.sec) .. "s"
             elseif dragging9 then
-                -- suwak unikania mordercy: ile studów dystansu trzymać (1-50)
+                -- suwak unikania mordercy: ile studów dystansu trzymać (1-50).
+                -- 1 = ucieczka tylko jak nóż jest na nas (farma zbiera wtedy
+                -- praktycznie zawsze), 15 = domyślnie, 50 = trzymaj się
+                -- mordercy jak najdalej (farma skręca w bok od noża).
                 local rel = math.clamp((i.Position.X - farmUi.bar.AbsolutePosition.X) / farmUi.bar.AbsoluteSize.X, 0, 1)
                 farmUi.fill.Size = UDim2.new(rel, 0, 1, 0)
                 farmAvoidDist = math.floor(1 + rel * 49)
@@ -2714,6 +2905,11 @@ function startMainScript()
     sfTP.ZIndex = 4
     sfTP.Parent = sbTP
     table.insert(allFrames, sfTP)
+
+    -- OSTATECZNE MALOWANIE: dopiero teraz istnieją wszystkie elementy GUI
+    -- (suwak Third Person powstał dopiero teraz) — modernize() zakłada mu
+    -- zaokrąglenia i poprawne rozmiary
+    updateTheme(currentTheme)
 
     bTP.MouseButton1Click:Connect(function()
         local on = not thirdPerson
@@ -3033,6 +3229,10 @@ function startMainScript()
     -- pozostałe robią przerwę — inaczej pętle walczą o pozycję co klatkę
     local killBusy = false      -- true = Auto Kill All w trakcie zabójstwa
     local gunDropRef = nil      -- ostatni znany GunDrop (szuka tylko Auto TP Gun)
+    -- true = Auto Farm nie ma co zbierać (brak monety w zasięgu) → wtedy
+    -- TP Farm może działać. Dzięki temu OBIE farmy mogą być włączone
+    -- naraz i żadna nie wyłącza drugiej.
+    local farmIdle = false
     local farmStuckClock = 0
     local farmFullScanTick = 0
     -- zegar "dobiegania do celu" podczas ucieczki: trzymamy go, żeby farma
@@ -3143,13 +3343,11 @@ function startMainScript()
         autoFarmCoins = not autoFarmCoins
         b13.Text = autoFarmCoins and "Auto Farm Coins: ON" or "Auto Farm Coins: OFF"
         b13.BackgroundColor3 = autoFarmCoins and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
-        -- obie farmy ustawiają CFrame — razem walczyłyby o postać,
-        -- więc włączenie jednej wyłącza drugą
-        if autoFarmCoins and tp.on then
-            tp.on = false
-            tp.ui.btn.Text = "TP Farm: OFF"
-            tp.ui.btn.BackgroundColor3 = themes[currentTheme].ButtonBg
-        end
+        -- OBIE farmy mogą być włączone NARAZ: nie wyłączamy drugiej.
+        -- Ruch postaci jest współdzielony, ale pilnują go flagi:
+        -- Auto Farm ma pierwszeństwo, a TP Farm wchodzi w grę tylko wtedy,
+        -- gdy Auto Farm nie ma co zbierać (farmIdle) i wstrzymuje się,
+        -- gdy TP Farm akurat idzie do monety (tp.walking).
         updateActiveCheatsList()
         if autoFarmCoins then
             coinScanClock = 999 -- wymuś odświeżenie listy monet od razu
@@ -3168,11 +3366,8 @@ function startMainScript()
         tp.on = not tp.on
         tp.ui.btn.Text = tp.on and "TP Farm: ON" or "TP Farm: OFF"
         tp.ui.btn.BackgroundColor3 = tp.on and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
-        if tp.on and autoFarmCoins then
-            autoFarmCoins = false
-            b13.Text = "Auto Farm Coins: OFF"
-            b13.BackgroundColor3 = themes[currentTheme].ButtonBg
-        end
+        -- OBIE farmy mogą być włączone NARAZ (patrz komentarz wyżej) —
+        -- przycisk TP Farm nie wyłącza już Auto Farm Coins
         updateActiveCheatsList()
         if tp.on then
             tp.nextAt = 0        -- pierwszy teleport od razu
@@ -3192,350 +3387,440 @@ function startMainScript()
     -- lokalnych na chunk, a osobny local na helper wywalał kompilację pliku.
     task.spawn(function()
         while true do
-            task.wait(0.02)
-            if tp.on then
-                local now = os.clock()
+            local ok, err = pcall(function()
+                task.wait(0.02)
+                if tp.on then
+                    -- reset na początku ticku: gdyby poprzedni tick padł
+                    -- w trakcie chodzenia, flaga nie blokowałaby Auto Farm
+                    tp.walking = false
+                    local now = os.clock()
 
-                -- własny odświeżacz listy monet — NIE tykamy coinScanClock,
-                -- bo to licznik starej farmy i wspólny go psułby
-                if now >= tp.scanAt then
-                    refreshCoinCache(false)
-                    tp.scanAt = now + (#coinCache > 0 and 1.5 or 0.75)
-                end
+                    -- własny odświeżacz listy monet — NIE tykamy coinScanClock,
+                    -- bo to licznik starej farmy i wspólny go psułby
+                    if now >= tp.scanAt then
+                        refreshCoinCache(false)
+                        tp.scanAt = now + (#coinCache > 0 and 1.5 or 0.75)
+                    end
 
-                if now >= tp.nextAt then
-                    -- KOORDYNACJA: zabójstwo (killBusy) albo leżąca broń
-                    -- (gunDropRef) — Auto Kill All / Auto TP Gun sterują wtedy
-                    -- postacią, TP Farm nie może im przeszkadzać chodzeniem.
-                    if killBusy or gunDropRef then
-                        tp.nextAt = now + 0.3  -- odpuść teraz, sprawdź za chwilę
-                    else
-                    local char = plr.Character
-                    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-                    local hum = char and char:FindFirstChildOfClass("Humanoid")
+                    if now >= tp.nextAt then
+                        -- KOORDYNACJA farm: Auto Farm ma pierwszeństwo, ALE gdy nie ma
+                        -- co zbierać (farmIdle), to TP Farm przejmuje postać. Żadna
+                        -- farma nie wyłącza drugiej — obie mogą być włączone naraz.
+                        if killBusy or gunDropRef or (autoFarmCoins and not farmIdle) then
+                            tp.nextAt = now + 0.3  -- odpuść teraz, sprawdź za chwilę
+                        else
+                        local char = plr.Character
+                        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                        local hum = char and char:FindFirstChildOfClass("Humanoid")
 
-                    if hrp and hum and hum.Health > 0 then
-                        local nearest, bestDist = nil, tp.range
-                        for i = #coinCache, 1, -1 do
-                            local c = coinCache[i]
-                            if not isCoinAlive(c) then
-                                table.remove(coinCache, i)
-                            elseif not coinBlacklist[c] then
-                                local d = (hrp.Position - c.Position).Magnitude
-                                if d < bestDist then
-                                    bestDist, nearest = d, c
+                        if hrp and hum and hum.Health > 0 then
+                            local nearest, bestDist = nil, tp.range
+                            for i = #coinCache, 1, -1 do
+                                local c = coinCache[i]
+                                if not isCoinAlive(c) then
+                                    table.remove(coinCache, i)
+                                elseif not coinBlacklist[c] then
+                                    local d = (hrp.Position - c.Position).Magnitude
+                                    if d < bestDist then
+                                        bestDist, nearest = d, c
+                                    end
                                 end
                             end
-                        end
 
-                        if nearest then
-                            local target = nearest.Position
+                            if nearest then
+                                local target = nearest.Position
 
-                            -- ANTI-KICK "Invalid position" (Error 267): teleport
-                            -- przez CFrame kopał NAWET po kawałku i nawet na
-                            -- "najbezpieczniejszych" ustawieniach — MM2 pilnuje
-                            -- surowej prędkości postaci, a nie sposobu ruchu.
-                            -- Dlatego "teleport" robimy ZWYKŁYM CHODZENIEM przy
-                            -- podniesionym WalkSpeed: ruch idzie przez silnik gry,
-                            -- więc serwer go akceptuje, a i tak lecimy błyskawicznie
-                            -- (200 stud/s = 12× normalny chód). Sterujemy TYLKO
-                            -- obrotem — CFrame bez translacji nie jest walidowany
-                            -- jako zmiana pozycji, więc nie kopa.
-                            local starySpeed = hum.WalkSpeed
-                            local staryRot = hum.AutoRotate
-                            hum.WalkSpeed = tp.walk
-                            hum.AutoRotate = false
+                                -- ANTI-KICK "Invalid position" (Error 267): teleport
+                                -- przez CFrame kopał NAWET po kawałku i nawet na
+                                -- "najbezpieczniejszych" ustawieniach — MM2 pilnuje
+                                -- surowej prędkości postaci, a nie sposobu ruchu.
+                                -- Dlatego "teleport" robimy ZWYKŁYM CHODZENIEM przy
+                                -- podniesionym WalkSpeed: ruch idzie przez silnik gry,
+                                -- więc serwer go akceptuje, a i tak lecimy błyskawicznie
+                                -- (200 stud/s = 12× normalny chód). Sterujemy TYLKO
+                                -- obrotem — CFrame bez translacji nie jest walidowany
+                                -- jako zmiana pozycji, więc nie kopa.
+                                local starySpeed = hum.WalkSpeed
+                                local staryRot = hum.AutoRotate
+                                hum.WalkSpeed = tp.walk
+                                hum.AutoRotate = false
 
-                            local koniec = os.clock() + 4
-                            while os.clock() < koniec do
-                                task.wait(0.05)
-                                if not tp.on or hum.Health <= 0 then break end
-                                local off = target - hrp.Position
-                                if off.Magnitude <= 3.2 then break end
-                                hrp.CFrame = CFrame.lookAt(
-                                    hrp.Position,
-                                    Vector3.new(target.X, hrp.Position.Y, target.Z))
+                                local koniec = os.clock() + 4
+                                tp.walking = true
+                                while os.clock() < koniec do
+                                    task.wait(0.05)
+                                    -- po task.wait postać mogła umrzeć / respawnąć:
+                                    -- model jest ZNISZCZONY, a .Position/.CFrame na
+                                    -- zniszczonej instancji = wyjątek, który dawniej
+                                    -- zabijał CAŁĄ pętlę farmy (farma milczała
+                                    -- do restartu skryptu). Dlatego bierzemy
+                                    -- świeżą postać po każdym czekaniu.
+                                    char = plr.Character
+                                    hrp = char and char:FindFirstChild("HumanoidRootPart")
+                                    hum = char and char:FindFirstChildOfClass("Humanoid")
+                                    if not (hrp and hum) then break end
+                                    if not tp.on or hum.Health <= 0 then break end
+                                    local off = target - hrp.Position
+                                    if off.Magnitude <= 3.2 then break end
+                                    hrp.CFrame = CFrame.lookAt(
+                                        hrp.Position,
+                                        Vector3.new(target.X, hrp.Position.Y, target.Z))
+                                end
+                                tp.walking = false
+
+                                -- prędkość/obrót przywracamy tylko przy żywej
+                                -- postaci (po respawnie hum to nowa instancja)
+                                if hum and hum.Parent then
+                                    hum.WalkSpeed = starySpeed
+                                    hum.AutoRotate = staryRot
+                                end
+
+                                -- Touched odpala się przy STARCIE kolizji, więc samo
+                                -- stanie przy monecie nic nie zalicza: odskakujemy
+                                -- i wracamy (kilkanaście studów = bezpieczne)
+                                if hrp and hrp.Parent then
+                                    local pos = hrp.Position
+                                    hrp.CFrame = CFrame.new(pos + Vector3.new(2.4, 0.3, 0))
+                                    task.wait(0.08)
+                                    hrp = getHRP(plr.Character) -- świeży HRP po respawnie
+                                    if hrp and hrp.Parent then
+                                        hrp.CFrame = CFrame.new(pos)
+                                    end
+                                    task.wait(0.08)
+                                end
+
+                                tp.nextAt = os.clock() + math.max(tp.sec, tp.minGap)
+                            else
+                                tp.nextAt = now + 0.5 -- brak monet: sprawdzaj częściej
                             end
-
-                            hum.WalkSpeed = starySpeed
-                            hum.AutoRotate = staryRot
-
-                            -- Touched odpala się przy STARCIE kolizji, więc samo
-                            -- stanie przy monecie nic nie zalicza: odskakujemy
-                            -- i wracamy (kilkanaście studów = bezpieczne)
-                            local pos = hrp.Position
-                            hrp.CFrame = CFrame.new(pos + Vector3.new(2.4, 0.3, 0))
-                            task.wait(0.08)
-                            hrp.CFrame = CFrame.new(pos)
-                            task.wait(0.08)
-
-                            tp.nextAt = os.clock() + math.max(tp.sec, tp.minGap)
                         else
-                            tp.nextAt = now + 0.5 -- brak monet: sprawdzaj częściej
+                            tp.nextAt = now + 0.5
                         end
-                    else
-                        tp.nextAt = now + 0.5
+                        end -- koniec gałęzi "można się ruszać" (killBusy/gunDropRef)
                     end
-                    end -- koniec gałęzi "można się ruszać" (killBusy/gunDropRef)
                 end
+            end)
+            if not ok then
+                -- BŁĄD W JEDNYM TICKU NIE MOŻE ZABIĆ PĘTLI FARMA:
+                -- bez pcall wyjątek kończył task.spawn i farma
+                -- milczała do restartu skryptu
+                warn("[SzpontHub] TP Farm tick error: " .. tostring(err))
+                task.wait(0.5)
             end
         end
     end)
 
     task.spawn(function()
         while true do
-            local rawDt = task.wait(0.02)
-            -- ANTI-KICK: dt przycięte — po lag spike'u postać NIE robi dużego
-            -- skoku (stary kod: speed * 0.5 s = 12-15 studów w jedną klatkę,
-            -- serwer MM2 kopał za "Invalid position")
-            local dt = math.min(rawDt, FARM_DT_CLAMP)
+            local ok, err = pcall(function()
+                local rawDt = task.wait(0.02)
+                -- ANTI-KICK: dt przycięte — po lag spike'u postać NIE robi dużego
+                -- skoku (stary kod: speed * 0.5 s = 12-15 studów w jedną klatkę,
+                -- serwer MM2 kopał za "Invalid position")
+                local dt = math.min(rawDt, FARM_DT_CLAMP)
 
-            -- wygasanie blokad na monety
-            local now = os.clock()
-            for coin, untilT in pairs(coinBlacklist) do
-                if now >= untilT or not coin.Parent then
-                    coinBlacklist[coin] = nil
-                end
-            end
-
-            if autoFarmCoins and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
-                local hrp = plr.Character.HumanoidRootPart
-                local hum = plr.Character:FindFirstChildOfClass("Humanoid")
-
-                -- NOCLIP NA CZAS FARMY: pozycją sterujemy co klatkę CFrame'em,
-                -- a kolizja tylko blokowała postać w ścianach (stanie w miejscu).
-                -- Humanoid potrafi sam odblokować kolizję części, więc ustawiamy
-                -- co tick. Włączający i wyłączający farmę przywracają kolizję.
-                for _, p in ipairs(plr.Character:GetChildren()) do
-                    if p:IsA("BasePart") then p.CanCollide = false end
-                end
-
-                coinScanClock = coinScanClock + dt
-                local empty = #coinCache == 0
-                if coinScanClock >= (empty and FARM_EMPTY_SCAN_INTERVAL or FARM_SCAN_INTERVAL) then
-                    coinScanClock = 0
-                    -- pełny skan workspace tylko co 4 odświeżenie, gdy lista pusta
-                    farmFullScanTick = farmFullScanTick + 1
-                    refreshCoinCache(empty and farmFullScanTick % 4 == 0)
-                end
-
-                -- UNIKANIE MORDERCY (suwak "Murder Dist", 1-50 studów): sprawdzamy
-                -- mordercę PRZED wyborem monety, żeby ucieczka działała też wtedy,
-                -- gdy monet akurat nie ma (stanie w miejscu = free kill dla noża).
-                local murHrp = nil
-                for _, p in ipairs(game:GetService("Players"):GetPlayers()) do
-                    if p ~= plr and p.Character and getRole(p) == "Murderer" then
-                        local m = p.Character:FindFirstChild("HumanoidRootPart")
-                        local mh = p.Character:FindFirstChildOfClass("Humanoid")
-                        if m and mh and mh.Health > 0 then
-                            murHrp = m
-                            break
-                        end
-                    end
-                end
-                -- kierunek ucieczki: prosto OD mordercy, tylko poziomo
-                -- (schodzimy w bok, nie w podłogę/sufit)
-                local awayFromMur = nil
-                if murHrp then
-                    local a = hrp.Position - murHrp.Position
-                    a = Vector3.new(a.X, 0, a.Z)
-                    if a.Magnitude < 0.5 then
-                        a = hrp.CFrame.LookVector  -- stoimy na nim: uciekamy przed siebie
-                    end
-                    if a.Magnitude < farmAvoidDist then
-                        awayFromMur = a
+                -- wygasanie blokad na monety
+                local now = os.clock()
+                for coin, untilT in pairs(coinBlacklist) do
+                    if now >= untilT or not coin.Parent then
+                        coinBlacklist[coin] = nil
                     end
                 end
 
-                local nearestCoin, shortestDistance = nil, math.huge
-                for i = #coinCache, 1, -1 do
-                    local coin = coinCache[i]
-                    if not isCoinAlive(coin) then
-                        table.remove(coinCache, i)
-                    elseif not coinBlacklist[coin] then
-                        local dist = (hrp.Position - coin.Position).Magnitude
-                        -- pomijamy monety spoza zasięgu (np. na innej mapie)
-                        if dist <= FARM_TARGET_RANGE and dist < shortestDistance then
-                            shortestDistance = dist
-                            nearestCoin = coin
-                        end
+                -- HRP na bieżąco: po respawnie nowy model nie ma jeszcze
+                -- HumanoidRootPart, a .HumanoidRootPart by rzucił wyjątek
+                local hrp = getHRP(plr.Character)
+                if autoFarmCoins and hrp then
+                    local hum = getHum(plr.Character)
+
+                    -- NOCLIP NA CZAS FARMY: pozycją sterujemy co klatkę CFrame'em,
+                    -- a kolizja tylko blokowała postać w ścianach (stanie w miejscu).
+                    -- Humanoid potrafi sam odblokować kolizję części, więc ustawiamy
+                    -- co tick. Włączający i wyłączający farmę przywracają kolizję.
+                    for _, p in ipairs(plr.Character:GetChildren()) do
+                        if p:IsA("BasePart") then p.CanCollide = false end
                     end
-                end
 
-                if killBusy or gunDropRef then
-                    -- KOORDYNACJA: Auto Kill All (killBusy) albo Auto TP Gun
-                    -- (broń leży na ziemi, gunDropRef) właśnie sterują CFrame
-                    -- postaci — farma stoi w miejscu, żeby nie walczyć o
-                    -- pozycję. Gdy zabójstwo/broniń skończy się, farma wraca.
-                    if hum then hum.AutoRotate = true end
-                    farmStuckCoin, farmStuckClock = nil, 0
-                elseif awayFromMur and (not hum or hum.Health > 0) then
-                    -- MORDERCA ZA BLISKO: ucieczka — ale NIE przestajemy zbierać.
-                    -- Stary kod uciekał w czystą stronę i czekał, aż morderca
-                    -- odejdzie: przez to gracz tracił cukierki/monety leżące
-                    -- po drodze, a morderca i tak dogonił (chód ~16 vs farma 24,
-                    -- więc dystans i tak się odbudowywał). Teraz w trakcie
-                    -- ucieczki farma łapie pickupy, o ile nie prowadzą prosto
-                    -- na nóż:
-                    --  * cel leży "od mordercy" (cos >= FARM_ESCAPE_SAFE_DOT), albo
-                    --  * cel jest bardzo blisko (<= FARM_ESCAPE_GRAB_NEAR)
-                    -- Kierunek ruchu to mieszanka ucieczki + celu, więc wypadkowy
-                    -- wektor dalej "ucieka" (dot >= bezpieczny próg), a my
-                    -- jednocześnie docieramy do pickupa.
-                    if hum then
-                        hum.PlatformStand = false
-                        hum.AutoRotate = false
+                    coinScanClock = coinScanClock + dt
+                    local empty = #coinCache == 0
+                    if coinScanClock >= (empty and FARM_EMPTY_SCAN_INTERVAL or FARM_SCAN_INTERVAL) then
+                        coinScanClock = 0
+                        -- pełny skan workspace tylko co 4 odświeżenie, gdy lista pusta
+                        farmFullScanTick = farmFullScanTick + 1
+                        refreshCoinCache(empty and farmFullScanTick % 4 == 0)
                     end
-                    hrp.Velocity = Vector3.new(0, 0, 0)
-                    hrp.RotVelocity = Vector3.new(0, 0, 0)
 
-                    local escDir = awayFromMur.Unit
-                    local moveDir = escDir
-                    local grabTarget = nil
-
-                    -- Wybór celu: NIE bierzemy po prostu najbliższej monety, bo
-                    -- może leżeć za nami (czyli w stronę mordercy). Szukamy
-                    -- najbliższej monety, do której pójście NIE zmniejsza
-                    -- odległości od noża (dot >= próg), albo bardzo bliskiej
-                    -- (tę łapiemy mimo wszystko — 3 study to ułamek sekundy).
-                    if #coinCache > 0 then
-                        local bestDist = math.huge
-                        for i = #coinCache, 1, -1 do
-                            local c = coinCache[i]
-                            if not isCoinAlive(c) then
-                                table.remove(coinCache, i)
-                            elseif not coinBlacklist[c] then
-                                local cDelta = c.Position - hrp.Position
-                                local flat = Vector3.new(cDelta.X, 0, cDelta.Z)
-                                local flatLen = flat.Magnitude
-                                if flatLen <= FARM_ESCAPE_GRAB_RANGE and flatLen < bestDist then
-                                    local safe = false
-                                    if flatLen > 0.05 then
-                                        safe = (escDir:Dot(flat.Unit)) >= FARM_ESCAPE_SAFE_DOT
-                                    end
-                                    if safe or flatLen <= FARM_ESCAPE_GRAB_NEAR then
-                                        bestDist = flatLen
-                                        grabTarget = c
-                                    end
+                    -- MORDERCA: wykrywamy go ZAWSZE (potrzebujemy kierunku
+                    -- ucieczki także wtedy, gdy zbieramy cukierki), ale sama
+                    -- ucieczka w czystą stronę włącza się dopiero, gdy nóż
+                    -- jest naprawdę blisko (FARM_PANIC_DIST).
+                    local murHrp = nil
+                    for _, p in ipairs(game:GetService("Players"):GetPlayers()) do
+                        if p ~= plr and p.Character and getRole(p) == "Murderer" then
+                            local m = p.Character:FindFirstChild("HumanoidRootPart")
+                            local mh = p.Character:FindFirstChildOfClass("Humanoid")
+                            -- gracz stojący w LOBBY to nie morderca na mapie —
+                            -- nie uciekamy od nikogo poza mapą. Sprawdzamy to
+                            -- tylko jak morderca jest blisko (isInLobby potrafi
+                            -- być drogie, więc nie wołamy go co klatkę).
+                            if m and mh and mh.Health > 0 then
+                                local dMur = (hrp.Position - m.Position).Magnitude
+                                if dMur < farmAvoidDist + 15 and not isInLobby(m.Position, 25) then
+                                    murHrp = m
+                                    break
                                 end
                             end
                         end
                     end
-
-                    if grabTarget then
-                        -- NOWY cel → zegar od nowa (inna moneta = świeży start).
-                        -- Dzięki temu po udanym zebraniu farma wraca do łapania,
-                        -- zamiast po 1,2 s przestać łapać w ogóle.
-                        if grabTarget ~= farmEscapeGrabTarget then
-                            farmEscapeGrabTarget = grabTarget
-                            farmEscapeGrabClock = 0
+                    -- kierunek ucieczki: prosto OD mordercy, tylko poziomo
+                    -- (schodzimy w bok, nie w podłogę/sufit)
+                    local awayFromMur, murDist = nil, math.huge
+                    if murHrp then
+                        local a = hrp.Position - murHrp.Position
+                        a = Vector3.new(a.X, 0, a.Z)
+                        murDist = a.Magnitude
+                        if murDist < 0.5 then
+                            a = hrp.CFrame.LookVector  -- stoimy na nim: uciekamy przed siebie
+                            murDist = 0.5
                         end
-                        -- zegar dobiegania: nie goniemy w kółko za jednym celem,
-                        -- bo morderca by nas dogonił. Po FARM_ESCAPE_GRAB_TIME
-                        -- przerywamy łapanie (zegar przestaje rosnąć, ale się nie
-                        -- zeruje — wrócimy do łapania, gdy cel zniknie/zmieni się).
-                        if farmEscapeGrabClock < FARM_ESCAPE_GRAB_TIME then
-                            farmEscapeGrabClock = farmEscapeGrabClock + dt
-                            local cDelta = grabTarget.Position - hrp.Position
-                            local flat = Vector3.new(cDelta.X, 0, cDelta.Z)
-                            if flat.Magnitude > 0.05 then
-                                -- mieszanka: ucieczka ma pierwszeństwo, cel tylko
-                                -- dokłada trochę — wypadkowy kierunek wciąż ucieka
-                                moveDir = (escDir + flat.Unit * 0.6).Unit
+                        awayFromMur = a
+                    end
+                    -- WAGA UCIECZKI: 0 = morderca daleko (zbieramy normalnie),
+                    -- 1 = nóż tuż przy nas (ucieczka ma pierwszeństwo).
+                    -- Między tymi wartościami farma zbiera, ale skręca w bok
+                    -- od noża — dzięki temu nie gubi wszystkich cukierków.
+                    local fleeWeight = 0
+                    if awayFromMur then
+                        -- próg paniki to min(FARM_PANIC_DIST, suwak): suwak
+                        -- "Murder Dist" na 1 = ucieczka tylko jak nóż jest
+                        -- na NAS (farma zbiera praktycznie zawsze)
+                        local panicDist = math.min(FARM_PANIC_DIST, farmAvoidDist)
+                        if murDist >= farmAvoidDist then
+                            fleeWeight = 0
+                        elseif murDist <= panicDist then
+                            fleeWeight = 1
+                        elseif farmAvoidDist > panicDist then
+                            fleeWeight = (farmAvoidDist - murDist) / (farmAvoidDist - panicDist)
+                        else
+                            fleeWeight = 1
+                        end
+                    end
+                    local panic = fleeWeight >= 1
+
+                    local nearestCoin, shortestDistance = nil, math.huge
+                    for i = #coinCache, 1, -1 do
+                        local coin = coinCache[i]
+                        if not isCoinAlive(coin) then
+                            table.remove(coinCache, i)
+                        elseif not coinBlacklist[coin] then
+                            local dist = (hrp.Position - coin.Position).Magnitude
+                            -- pomijamy monety spoza zasięgu (np. na innej mapie)
+                            if dist <= FARM_TARGET_RANGE and dist < shortestDistance then
+                                shortestDistance = dist
+                                nearestCoin = coin
+                            end
+                        end
+                    end
+
+                    -- stan "nie mam co zbierać" → TP Farm może w tym czasie
+                    -- teleportować do monety (obie farmy mogą być ON naraz)
+                    farmIdle = (nearestCoin == nil)
+
+                    if killBusy or gunDropRef or tp.walking then
+                        -- KOORDYNACJA: Auto Kill All (killBusy), Auto TP Gun
+                        -- (broń leży na ziemi, gunDropRef) albo TP Farm właśnie
+                        -- idzie do monety — ktoś steruje CFrame postaci, więc
+                        -- farma stoi w miejscu i nie walczy o pozycję.
+                        if hum then hum.AutoRotate = true end
+                        farmStuckCoin, farmStuckClock = nil, 0
+                        farmIdle = false
+                    elseif panic and (not hum or hum.Health > 0) then
+                        -- MORDERCA PRZY NAS (panika): ucieczka — ale NIE przestajemy
+                        -- zbierać. Stary kod uciekał w czystą stronę i czekał, aż
+                        -- morderca odejdzie: przez to gracz tracił cukierki/monety
+                        -- leżące po drodze, a morderca i tak dogonił (chód ~16 vs
+                        -- farma 24, więc dystans i tak się odbudowywał). Teraz w
+                        -- trakcie ucieczki farma łapie pickupy, o ile nie prowadzą
+                        -- prosto na nóż:
+                        --  * cel leży "od mordercy" (cos >= FARM_ESCAPE_SAFE_DOT), albo
+                        --  * cel jest bardzo blisko (<= FARM_ESCAPE_GRAB_NEAR)
+                        -- Kierunek ruchu to mieszanka ucieczki + celu, więc wypadkowy
+                        -- wektor dalej "ucieka" (dot >= bezpieczny próg), a my
+                        -- jednocześnie docieramy do pickupa.
+                        if hum then
+                            hum.PlatformStand = false
+                            hum.AutoRotate = false
+                        end
+                        hrp.Velocity = Vector3.new(0, 0, 0)
+                        hrp.RotVelocity = Vector3.new(0, 0, 0)
+
+                        local escDir = awayFromMur.Unit
+                        local moveDir = escDir
+                        local grabTarget = nil
+
+                        -- Wybór celu: NIE bierzemy po prostu najbliższej monety, bo
+                        -- może leżeć za nami (czyli w stronę mordercy). Szukamy
+                        -- najbliższej monety, do której pójście NIE zmniejsza
+                        -- odległości od noża (dot >= próg), albo bardzo bliskiej
+                        -- (tę łapiemy mimo wszystko — 3 study to ułamek sekundy).
+                        if #coinCache > 0 then
+                            local bestDist = math.huge
+                            for i = #coinCache, 1, -1 do
+                                local c = coinCache[i]
+                                if not isCoinAlive(c) then
+                                    table.remove(coinCache, i)
+                                elseif not coinBlacklist[c] then
+                                    local cDelta = c.Position - hrp.Position
+                                    local flat = Vector3.new(cDelta.X, 0, cDelta.Z)
+                                    local flatLen = flat.Magnitude
+                                    if flatLen <= FARM_ESCAPE_GRAB_RANGE and flatLen < bestDist then
+                                        local safe = false
+                                        if flatLen > 0.05 then
+                                            safe = (escDir:Dot(flat.Unit)) >= FARM_ESCAPE_SAFE_DOT
+                                        end
+                                        if safe or flatLen <= FARM_ESCAPE_GRAB_NEAR then
+                                            bestDist = flatLen
+                                            grabTarget = c
+                                        end
+                                    end
+                                end
+                            end
+                        end
+
+                        if grabTarget then
+                            -- NOWY cel → zegar od nowa (inna moneta = świeży start).
+                            -- Dzięki temu po udanym zebraniu farma wraca do łapania,
+                            -- zamiast po 1,2 s przestać łapać w ogóle.
+                            if grabTarget ~= farmEscapeGrabTarget then
+                                farmEscapeGrabTarget = grabTarget
+                                farmEscapeGrabClock = 0
+                            end
+                            -- zegar dobiegania: nie goniemy w kółko za jednym celem,
+                            -- bo morderca by nas dogonił. Po FARM_ESCAPE_GRAB_TIME
+                            -- przerywamy łapanie (zegar przestaje rosnąć, ale się nie
+                            -- zeruje — wrócimy do łapania, gdy cel zniknie/zmieni się).
+                            if farmEscapeGrabClock < FARM_ESCAPE_GRAB_TIME then
+                                farmEscapeGrabClock = farmEscapeGrabClock + dt
+                                local cDelta = grabTarget.Position - hrp.Position
+                                local flat = Vector3.new(cDelta.X, 0, cDelta.Z)
+                                if flat.Magnitude > 0.05 then
+                                    -- mieszanka: ucieczka ma pierwszeństwo, cel tylko
+                                    -- dokłada trochę — wypadkowy kierunek wciąż ucieka
+                                    moveDir = (escDir + flat.Unit * 0.6).Unit
+                                end
+                            else
+                                grabTarget = nil
                             end
                         else
-                            grabTarget = nil
+                            -- brak bezpiecznego celu → sama ucieczka, zegar od nowa
+                            farmEscapeGrabClock = 0
+                            farmEscapeGrabTarget = nil
                         end
-                    else
-                        -- brak bezpiecznego celu → sama ucieczka, zegar od nowa
-                        farmEscapeGrabClock = 0
-                        farmEscapeGrabTarget = nil
-                    end
 
-                    if grabTarget then
-                        -- cel: środek pickupa; blisko niego kręcimy się w kółko,
-                        -- bo Touched odpala się na POCZĄTKU kolizji (samo stanie
-                        -- w monecie nie gwarantuje zbioru) — tak samo jak w farmie
-                        local goal = grabTarget.Position
-                        if (hrp.Position - goal).Magnitude < 1.5 then
-                            local a = now * 8
-                            goal = goal + Vector3.new(math.cos(a), 0, math.sin(a)) * 1.4
-                        end
-                        local offset = goal - hrp.Position
-                        if offset.Magnitude > 0.05 then
-                            local escSpeed = math.clamp(farmSpeed, 5, FARM_SAFE_SPEED_CAP)
-                            local escStep = math.min(offset.Magnitude, escSpeed * dt, FARM_MAX_STEP)
-                            -- ruch po MIESZANCE (ucieczka + cel), nie prosto na cel:
-                            -- dzięki temu wciąż oddalamy się od mordercy, a
-                            -- jednocześnie docieramy do pickupa
-                            local step = (offset.Unit + moveDir) * 0.5
-                            if step.Magnitude < 0.01 then step = moveDir end
-                            hrp.CFrame = CFrame.new(hrp.Position + step.Unit * escStep)
-                                * (hrp.CFrame - hrp.CFrame.Position)
-                        end
-                    else
-                        local escGoal = hrp.Position + escDir * (farmAvoidDist + 2)
-                        local escOffset = escGoal - hrp.Position
-                        if escOffset.Magnitude > 0.05 then
-                            local escSpeed = math.clamp(farmSpeed, 5, FARM_SAFE_SPEED_CAP)
-                            local escStep = math.min(escOffset.Magnitude, escSpeed * dt, FARM_MAX_STEP)
-                            hrp.CFrame = CFrame.new(hrp.Position + escOffset.Unit * escStep)
-                                * (hrp.CFrame - hrp.CFrame.Position)
-                        end
-                    end
-                elseif nearestCoin and (not hum or hum.Health > 0) then
-                    if hum then
-                        hum.PlatformStand = false
-                        hum.AutoRotate = false
-                    end
-
-                    -- ANTI-STUCK: dotarliśmy do monety i nic się nie dzieje →
-                    -- po FARM_STUCK_TIME czarna lista i lecimy do następnej
-                    if shortestDistance < 3 then
-                        if nearestCoin == farmStuckCoin then
-                            farmStuckClock = farmStuckClock + dt
+                        if grabTarget then
+                            -- cel: środek pickupa; blisko niego kręcimy się w kółko,
+                            -- bo Touched odpala się na POCZĄTKU kolizji (samo stanie
+                            -- w monecie nie gwarantuje zbioru) — tak samo jak w farmie
+                            local goal = grabTarget.Position
+                            if (hrp.Position - goal).Magnitude < 1.5 then
+                                local a = now * 8
+                                goal = goal + Vector3.new(math.cos(a), 0, math.sin(a)) * 1.4
+                            end
+                            local offset = goal - hrp.Position
+                            if offset.Magnitude > 0.05 then
+                                local escSpeed = math.clamp(farmSpeed, 5, FARM_SAFE_SPEED_CAP)
+                                local escStep = math.min(offset.Magnitude, escSpeed * dt, FARM_MAX_STEP)
+                                -- ruch po MIESZANCE (ucieczka + cel), nie prosto na cel:
+                                -- dzięki temu wciąż oddalamy się od mordercy, a
+                                -- jednocześnie docieramy do pickupa
+                                local step = (offset.Unit + moveDir) * 0.5
+                                if step.Magnitude < 0.01 then step = moveDir end
+                                hrp.CFrame = CFrame.new(hrp.Position + step.Unit * escStep)
+                                    * (hrp.CFrame - hrp.CFrame.Position)
+                            end
                         else
-                            farmStuckCoin, farmStuckClock = nearestCoin, 0
+                            local escGoal = hrp.Position + escDir * (farmAvoidDist + 2)
+                            local escOffset = escGoal - hrp.Position
+                            if escOffset.Magnitude > 0.05 then
+                                local escSpeed = math.clamp(farmSpeed, 5, FARM_SAFE_SPEED_CAP)
+                                local escStep = math.min(escOffset.Magnitude, escSpeed * dt, FARM_MAX_STEP)
+                                hrp.CFrame = CFrame.new(hrp.Position + escOffset.Unit * escStep)
+                                    * (hrp.CFrame - hrp.CFrame.Position)
+                            end
                         end
-                        if farmStuckClock >= FARM_STUCK_TIME then
-                            -- odrzucamy TWARDO: stary kod blacklistował na10 s,
-                            -- po czym farma wracała do tej samej martwej monety
-                            -- w kółko. Teraz moneta jest ignorowana do końca
-                            -- rundy (clear przy pełnym skanie pustej mapy).
-                            coinBlacklist[nearestCoin] = math.huge
+                    elseif nearestCoin and (not hum or hum.Health > 0) then
+                        if hum then
+                            hum.PlatformStand = false
+                            hum.AutoRotate = false
+                        end
+
+                        -- ANTI-STUCK: dotarliśmy do monety i nic się nie dzieje →
+                        -- po FARM_STUCK_TIME czarna lista i lecimy do następnej
+                        if shortestDistance < 3 then
+                            if nearestCoin == farmStuckCoin then
+                                farmStuckClock = farmStuckClock + dt
+                            else
+                                farmStuckCoin, farmStuckClock = nearestCoin, 0
+                            end
+                            if farmStuckClock >= FARM_STUCK_TIME then
+                                -- odrzucamy monetę na KILKA SEKUND, nie na zawsze:
+                                -- stary kod dawał math.huge = moneta ignorowana do
+                                -- końca rundy, a farma przez to wyglądała na
+                                -- zepsutą (nie brała nawet monet, które dało się
+                                -- zebrać). Po 20 s wracamy do niej.
+                                coinBlacklist[nearestCoin] = now + FARM_BLACKLIST_TIME
+                                farmStuckCoin, farmStuckClock = nil, 0
+                            end
+                        else
                             farmStuckCoin, farmStuckClock = nil, 0
                         end
+
+                        hrp.Velocity = Vector3.new(0, 0, 0)
+                        hrp.RotVelocity = Vector3.new(0, 0, 0)
+
+                        -- cel: środek monety; gdy już jesteśmy w środku, jeździmy
+                        -- kółko wokół niej — Touched odpala się na POCZĄTKU
+                        -- kolizji, więc samo stanie w monety nie gwarantuje zbioru
+                        local goal = nearestCoin.Position
+                        if shortestDistance < 1.5 then
+                            local a = now * 8
+                            goal = nearestCoin.Position + Vector3.new(math.cos(a), 0, math.sin(a)) * 1.4
+                        end
+
+                        local offset = goal - hrp.Position
+                        local dist = offset.Magnitude
+                        if dist > 0.05 then
+                            -- ruch co klatkę: suwak przycięty do progu + twardy
+                            -- limit kroku, którego nie da się przekroczyć nawet po lagu
+                            local speed = math.clamp(farmSpeed, 5, FARM_SAFE_SPEED_CAP)
+                            local step = math.min(dist, speed * dt, FARM_MAX_STEP)
+                            local dir = offset.Unit
+                            if fleeWeight > 0 and awayFromMur then
+                                -- MIESZANKA: cel + ucieczka. Waga rośnie wraz ze
+                                -- zbliżaniem mordercy, ale farma NIE PRZESTAJE
+                                -- ZBIERAĆ — tylko skręca w bok od noża.
+                                -- (stary kod w tym miejscu w ogóle nie ruszał się
+                                -- do cukierka, tylko uciekał = zero cukierków)
+                                local w = fleeWeight * 0.6
+                                local bl = dir * (1 - w) + awayFromMur.Unit * w
+                                if bl.Magnitude > 0.01 then dir = bl.Unit end
+                            end
+                            local newPos = hrp.Position + dir * step
+                            local rot = hrp.CFrame - hrp.CFrame.Position
+                            hrp.CFrame = CFrame.new(newPos) * rot
+                        end
                     else
+                        if hum then hum.AutoRotate = true end
                         farmStuckCoin, farmStuckClock = nil, 0
                     end
-
-                    hrp.Velocity = Vector3.new(0, 0, 0)
-                    hrp.RotVelocity = Vector3.new(0, 0, 0)
-
-                    -- cel: środek monety; gdy już jesteśmy w środku, jeździmy
-                    -- kółko wokół niej — Touched odpala się na POCZĄTKU
-                    -- kolizji, więc samo stanie w monety nie gwarantuje zbioru
-                    local goal = nearestCoin.Position
-                    if shortestDistance < 1.5 then
-                        local a = now * 8
-                        goal = nearestCoin.Position + Vector3.new(math.cos(a), 0, math.sin(a)) * 1.4
-                    end
-
-                    local offset = goal - hrp.Position
-                    local dist = offset.Magnitude
-                    if dist > 0.05 then
-                        -- ruch co klatkę: suwak przycięty do progu + twardy
-                        -- limit kroku, którego nie da się przekroczyć nawet po lagu
-                        local speed = math.clamp(farmSpeed, 5, FARM_SAFE_SPEED_CAP)
-                        local step = math.min(dist, speed * dt, FARM_MAX_STEP)
-                        local newPos = hrp.Position + offset.Unit * step
-                        local rot = hrp.CFrame - hrp.CFrame.Position
-                        hrp.CFrame = CFrame.new(newPos) * rot
-                    end
-                else
-                    if hum then hum.AutoRotate = true end
-                    farmStuckCoin, farmStuckClock = nil, 0
                 end
+            end)
+            if not ok then
+                -- BŁĄD W JEDNYM TICKU NIE MOŻE ZABIĆ PĘTLI FARMA:
+                -- bez pcall wyjątek kończył task.spawn i farma
+                -- milczała do restartu skryptu
+                warn("[SzpontHub] Auto Farm tick error: " .. tostring(err))
+                task.wait(0.5)
             end
         end
     end)
@@ -3555,20 +3840,38 @@ function startMainScript()
                 if not (gun and (gun.Name:lower():find("gun") or gun.Name:lower():find("revolver") or gun.Name:lower():find("pistol"))) then
                     local bpGun = plr.Backpack:FindFirstChildOfClass("Tool")
                     if bpGun and (bpGun.Name:lower():find("gun") or bpGun.Name:lower():find("revolver") or bpGun.Name:lower():find("pistol")) then
-                        plr.Character.Humanoid:EquipTool(bpGun)
-                        gun = bpGun
+                        -- Humanoid przez getHum: po respawnie może go nie być
+                        local hum = getHum(plr.Character)
+                        if hum then
+                            hum:EquipTool(bpGun)
+                            gun = bpGun
+                        end
                     end
                 end
                 if gun then
-                    for _, target in pairs(playersService:GetPlayers()) do
-                        if not autoKillMurder then break end
-                        if isTargetValid(target) and getRole(target) == "Murderer" then
-                            local targetHrp = target.Character.HumanoidRootPart
-                            local myHrp = plr.Character.HumanoidRootPart
-                            myHrp.CFrame = targetHrp.CFrame * CFrame.new(0, 0, -3) * CFrame.Angles(0, math.rad(180), 0)
-                            gun:Activate()
-                            task.wait(0.2)
+                    -- Auto Kill Murder też steruje CFrame postaci, więc na czas
+                    -- teleportu do mordercy farma musi wstrzymać się (killBusy),
+                    -- inaczej obie walczą o pozycję co klatkę
+                    killBusy = true
+                    local okKill, errKill = pcall(function()
+                        for _, target in pairs(playersService:GetPlayers()) do
+                            if not autoKillMurder then break end
+                            if isTargetValid(target) and getRole(target) == "Murderer" then
+                                -- HRP na bieżąco: pętla ma task.wait, więc
+                                -- w trakcie respawnu model postaci się zmienia
+                                local targetHrp = getHRP(target.Character)
+                                local myHrp = getHRP(plr.Character)
+                                if myHrp and targetHrp then
+                                    myHrp.CFrame = targetHrp.CFrame * CFrame.new(0, 0, -3) * CFrame.Angles(0, math.rad(180), 0)
+                                    gun:Activate()
+                                    task.wait(0.2)
+                                end
+                            end
                         end
+                    end)
+                    killBusy = false
+                    if not okKill then
+                        warn("[SzpontHub] Auto Kill Murder error: " .. tostring(errKill))
                     end
                 end
             end
@@ -3591,8 +3894,12 @@ function startMainScript()
                     if not (knife and (knife.Name:lower():find("knife") or knife.Name:lower():find("blade") or knife.Name:lower():find("nóż"))) then
                         local bpKnife = plr.Backpack:FindFirstChildOfClass("Tool")
                         if bpKnife and (bpKnife.Name:lower():find("knife") or bpKnife.Name:lower():find("blade") or bpKnife.Name:lower():find("nóż")) then
-                            plr.Character.Humanoid:EquipTool(bpKnife)
-                            knife = bpKnife
+                            -- Humanoid przez getHum: po respawnie może go nie być
+                            local hum = getHum(plr.Character)
+                            if hum then
+                                hum:EquipTool(bpKnife)
+                                knife = bpKnife
+                            end
                         end
                     end
                     if knife then
@@ -3600,19 +3907,33 @@ function startMainScript()
                         -- killBusy pauzuje Auto Farm i TP Farm (oraz Auto TP
                         -- Gun), żeby nie odbijały postaci od celu zabójstwa
                         killBusy = true
-                        for _, target in pairs(playersService:GetPlayers()) do
-                            if not autoKillAll then break end
-                            if isTargetValid(target) then
-                                local targetHrp = target.Character.HumanoidRootPart
-                                local myHrp = plr.Character.HumanoidRootPart
-                                myHrp.CFrame = targetHrp.CFrame * CFrame.new(0, 0, 1)
-                                knife:Activate()
-                                task.wait(0.2)
+                        -- pcall + reset poniżej: wyjątek w tej pętli (np. zniknięta
+                        -- postać w trakcie respawnu) NIGDY nie może zostawić
+                        -- killBusy = true — bo wtedy obie farmy stały w miejscu
+                        -- do restartu skryptu
+                        local okKill, errKill = pcall(function()
+                            for _, target in pairs(playersService:GetPlayers()) do
+                                if not autoKillAll then break end
+                                if isTargetValid(target) then
+                                    -- HRP na bieżąco: pętla ma task.wait, więc w trakcie
+                                    -- respawnu model postaci bywa wymieniany i wtedy
+                                    -- .HumanoidRootPart rzuca "not a valid member"
+                                    local targetHrp = getHRP(target.Character)
+                                    local myHrp = getHRP(plr.Character)
+                                    if myHrp and targetHrp then
+                                        myHrp.CFrame = targetHrp.CFrame * CFrame.new(0, 0, 1)
+                                        knife:Activate()
+                                        task.wait(0.2)
+                                    end
+                                end
                             end
-                        end
+                        end)
                         -- skasuj flagę zawsze (także po break), bo inaczej
                         -- farmy zostałyby zablokowane na stałe
                         killBusy = false
+                        if not okKill then
+                            warn("[SzpontHub] Auto Kill All error: " .. tostring(errKill))
+                        end
                     end
                 end
             end
@@ -3624,15 +3945,18 @@ function startMainScript()
         b8.Text = spinbotEnabled and "Spinbot: ON" or "Spinbot: OFF"
         b8.BackgroundColor3 = spinbotEnabled and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
         updateActiveCheatsList()
-        if not spinbotEnabled and plr.Character and plr.Character:FindFirstChild("Humanoid") then
-            plr.Character.Humanoid.AutoRotate = true
+        if not spinbotEnabled then
+            -- Humanoid przez getHum: po respawnie model może go nie mieć
+            local hum = getHum(plr.Character)
+            if hum then hum.AutoRotate = true end
         end
     end)
 
     runService.RenderStepped:Connect(function()
-        if spinbotEnabled and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
-            local hrp = plr.Character.HumanoidRootPart
-            local hum = plr.Character:FindFirstChild("Humanoid")
+        -- HRP na bieżąco (respawn = nowy model bez HumanoidRootPart)
+        local hrp = getHRP(plr.Character)
+        if spinbotEnabled and hrp then
+            local hum = getHum(plr.Character)
             if hum then hum.AutoRotate = false end
             hrp.CFrame = hrp.CFrame * CFrame.Angles(0, math.rad(spinSpeedVal), 0)
         end
@@ -3884,8 +4208,9 @@ function startMainScript()
         -- Warunki sprawdzamy co klatkę, żeby reagować na śmierć/zmianę roli.
         local hum = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
         local zywyNieMorderca = hum and hum.Health > 0 and getRole(plr) ~= "Murderer"
-        if autoGunTP and zywyNieMorderca and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
-            local hrp = plr.Character.HumanoidRootPart
+        -- HRP na bieżąco (respawn = nowy model bez HumanoidRootPart)
+        local hrp = getHRP(plr.Character)
+        if autoGunTP and zywyNieMorderca and hrp then
             local gunDrop = workspace:FindFirstChild("GunDrop", true)
             -- gunDropRef = widok dla farm: broń leży na ziemi, więc Auto Farm
             -- i TP Farm pauzują (i tak już pauzuje je killBusy w trakcie zabójstwa)
@@ -3919,16 +4244,21 @@ function startMainScript()
         b1.Text = flying and "Fly: ON" or "Fly: OFF"
         b1.BackgroundColor3 = flying and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
         updateActiveCheatsList()
-        if not flying and plr.Character and plr.Character:FindFirstChild("Humanoid") then
-            plr.Character.Humanoid.PlatformStand = false
-            plr.Character.Humanoid.AutoRotate = true
+        if not flying then
+            -- Humanoid przez getHum: po respawnie model może go nie mieć
+            local hum = getHum(plr.Character)
+            if hum then
+                hum.PlatformStand = false
+                hum.AutoRotate = true
+            end
         end
     end)
 
     runService.RenderStepped:Connect(function(dt)
-        if flying and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
-            local hrp = plr.Character.HumanoidRootPart
-            local hum = plr.Character:FindFirstChild("Humanoid")
+        -- HRP na bieżąco (respawn = nowy model bez HumanoidRootPart)
+        local hrp = getHRP(plr.Character)
+        if flying and hrp then
+            local hum = getHum(plr.Character)
             if hum then
                 hum.PlatformStand = true
                 hum.AutoRotate = false
@@ -3974,8 +4304,10 @@ function startMainScript()
     end)
 
     runService.RenderStepped:Connect(function()
-        if plr.Character and plr.Character:FindFirstChild("Humanoid") then
-            plr.Character.Humanoid.WalkSpeed = speedHack and walkSpeedVal or 16
+        -- Humanoid przez getHum: po respawnie model może go nie mieć
+        local hum = getHum(plr.Character)
+        if hum then
+            hum.WalkSpeed = speedHack and walkSpeedVal or 16
         end
     end)
 
@@ -4959,30 +5291,42 @@ function startBloxStrikeScript()
     bsCheatsGui = activeCheatsGui
 
     local cheatsPanel = Instance.new("Frame")
-    cheatsPanel.Size = UDim2.new(0, 200, 1, -330)
-    cheatsPanel.Position = UDim2.new(1, -210, 0, 325)
+    cheatsPanel.Size = UDim2.new(0, 230, 1, -330)
+    cheatsPanel.Position = UDim2.new(1, -240, 0, 325)
     cheatsPanel.BackgroundColor3 = themes[currentTheme].Dark
-    cheatsPanel.BackgroundTransparency = 0.3
-    cheatsPanel.BorderSizePixel = 2
+    cheatsPanel.BackgroundTransparency = 0.15
+    cheatsPanel.BorderSizePixel = 1
     cheatsPanel.BorderColor3 = themes[currentTheme].Primary
     cheatsPanel.Active = false
     cheatsPanel.Draggable = false
     cheatsPanel.Parent = activeCheatsGui
+    do
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0, 10)
+        c.Parent = cheatsPanel
+    end
 
     local cheatsTitle = Instance.new("TextLabel")
-    cheatsTitle.Size = UDim2.new(1, 0, 0, 28)
+    cheatsTitle.Size = UDim2.new(1, 0, 0, 32)
     cheatsTitle.BackgroundColor3 = themes[currentTheme].Primary
-    cheatsTitle.BackgroundTransparency = 0.2
+    cheatsTitle.BackgroundTransparency = 0
     cheatsTitle.BorderSizePixel = 0
-    cheatsTitle.Text = "🔥 LiptonHub List 🔥"
-    cheatsTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
-    cheatsTitle.TextSize = 13
-    cheatsTitle.Font = Enum.Font.SourceSansBold
+    cheatsTitle.Text = "ACTIVE"
+    cheatsTitle.TextColor3 = themes[currentTheme].Dark
+    cheatsTitle.TextSize = 14
+    cheatsTitle.Font = Enum.Font.GothamBold
+    cheatsTitle.TextXAlignment = Enum.TextXAlignment.Left
+    cheatsTitle.Position = UDim2.new(0, 0, 0, 0)
     cheatsTitle.Parent = cheatsPanel
+    do
+        local pad = Instance.new("UIPadding")
+        pad.PaddingLeft = UDim.new(0, 12)
+        pad.Parent = cheatsTitle
+    end
 
     local cheatsScroll = Instance.new("ScrollingFrame")
-    cheatsScroll.Size = UDim2.new(0.95, 0, 0.92, 0)
-    cheatsScroll.Position = UDim2.new(0.025, 0, 0.07, 0)
+    cheatsScroll.Size = UDim2.new(0.95, 0, 1, -44)
+    cheatsScroll.Position = UDim2.new(0.025, 0, 0, 40)
     cheatsScroll.BackgroundTransparency = 1
     cheatsScroll.BorderSizePixel = 0
     cheatsScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
@@ -4991,7 +5335,7 @@ function startBloxStrikeScript()
     cheatsScroll.Parent = cheatsPanel
 
     local cheatsListLayout = Instance.new("UIListLayout")
-    cheatsListLayout.Padding = UDim.new(0, 3)
+    cheatsListLayout.Padding = UDim.new(0, 4)
     cheatsListLayout.SortOrder = Enum.SortOrder.LayoutOrder
     cheatsListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
     cheatsListLayout.Parent = cheatsScroll
@@ -9382,30 +9726,42 @@ function startRivalsScript()
     rivalsCheatsGui = activeCheatsGui
 
     local cheatsPanel = Instance.new("Frame")
-    cheatsPanel.Size = UDim2.new(0, 200, 1, -330)
-    cheatsPanel.Position = UDim2.new(1, -210, 0, 325)
+    cheatsPanel.Size = UDim2.new(0, 230, 1, -330)
+    cheatsPanel.Position = UDim2.new(1, -240, 0, 325)
     cheatsPanel.BackgroundColor3 = themes[currentTheme].Dark
-    cheatsPanel.BackgroundTransparency = 0.3
-    cheatsPanel.BorderSizePixel = 2
+    cheatsPanel.BackgroundTransparency = 0.15
+    cheatsPanel.BorderSizePixel = 1
     cheatsPanel.BorderColor3 = themes[currentTheme].Primary
     cheatsPanel.Active = false
     cheatsPanel.Draggable = false
     cheatsPanel.Parent = activeCheatsGui
+    do
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0, 10)
+        c.Parent = cheatsPanel
+    end
 
     local cheatsTitle = Instance.new("TextLabel")
-    cheatsTitle.Size = UDim2.new(1, 0, 0, 28)
+    cheatsTitle.Size = UDim2.new(1, 0, 0, 32)
     cheatsTitle.BackgroundColor3 = themes[currentTheme].Primary
-    cheatsTitle.BackgroundTransparency = 0.2
+    cheatsTitle.BackgroundTransparency = 0
     cheatsTitle.BorderSizePixel = 0
-    cheatsTitle.Text = "🔥 LiptonHub List 🔥"
-    cheatsTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
-    cheatsTitle.TextSize = 13
-    cheatsTitle.Font = Enum.Font.SourceSansBold
+    cheatsTitle.Text = "ACTIVE"
+    cheatsTitle.TextColor3 = themes[currentTheme].Dark
+    cheatsTitle.TextSize = 14
+    cheatsTitle.Font = Enum.Font.GothamBold
+    cheatsTitle.TextXAlignment = Enum.TextXAlignment.Left
+    cheatsTitle.Position = UDim2.new(0, 0, 0, 0)
     cheatsTitle.Parent = cheatsPanel
+    do
+        local pad = Instance.new("UIPadding")
+        pad.PaddingLeft = UDim.new(0, 12)
+        pad.Parent = cheatsTitle
+    end
 
     local cheatsScroll = Instance.new("ScrollingFrame")
-    cheatsScroll.Size = UDim2.new(0.95, 0, 0.92, 0)
-    cheatsScroll.Position = UDim2.new(0.025, 0, 0.07, 0)
+    cheatsScroll.Size = UDim2.new(0.95, 0, 1, -44)
+    cheatsScroll.Position = UDim2.new(0.025, 0, 0, 40)
     cheatsScroll.BackgroundTransparency = 1
     cheatsScroll.BorderSizePixel = 0
     cheatsScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
@@ -9414,7 +9770,7 @@ function startRivalsScript()
     cheatsScroll.Parent = cheatsPanel
 
     local cheatsListLayout = Instance.new("UIListLayout")
-    cheatsListLayout.Padding = UDim.new(0, 3)
+    cheatsListLayout.Padding = UDim.new(0, 4)
     cheatsListLayout.SortOrder = Enum.SortOrder.LayoutOrder
     cheatsListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
     cheatsListLayout.Parent = cheatsScroll
