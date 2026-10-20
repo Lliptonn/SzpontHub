@@ -18,6 +18,25 @@ local tweenService = game:GetService("TweenService")
 local lighting = game:GetService("Lighting")
 
 ------------------------------------------------------------
+-- OCHRONA PRZED "ZOMBIE" (stare instancje skryptu)
+-- Każde ponowne uruchomienie skryptu ZOSTAWIA w tle stare pętle
+-- (farma, TP farm, spinbot, annoy, third person...) i te kontrolują
+-- tę samą postać co nowa instancja — walczą się ze sobą i wszystko
+-- wygląda "randomowo" (farma stoi, postać lata, itd.).
+-- Licznik generacji w getgenv: nowa instancja podbija licznik, a stare
+-- pętle widzą, że nie są już aktualne, i same się wyłączają.
+------------------------------------------------------------
+local SCRIPT_GEN = 0
+if type(getgenv) == "function" then
+    SCRIPT_GEN = (getgenv().SzpontHubGen or 0) + 1
+    getgenv().SzpontHubGen = SCRIPT_GEN
+end
+local function isCurrentGen()
+    if type(getgenv) ~= "function" then return true end
+    return getgenv().SzpontHubGen == SCRIPT_GEN
+end
+
+------------------------------------------------------------
 -- UNIVERSAL GUI PARENTING
 ------------------------------------------------------------
 local function getTargetGui()
@@ -579,6 +598,17 @@ function startMainScript()
     local targetPlayerName = nil
     local flingTargetEnabled = false
 
+    -- ANNOY: lata za wybraną osobą (annoyTargetName) i huśta się do przodu
+    -- i do tyłu za jej plecami. MA WŁASNY CEL (przycisk "Annoy Target:"),
+    -- bo kogoś można chcieć pchać, a flingować kogo innego.
+    local annoyEnabled = false
+    local annoyTargetName = nil
+    local annoyPhase = 0
+    -- tryb listy graczy: dla kogo wybieramy osobę ("fling" albo "annoy")
+    local targetPickMode = "fling"
+    -- (stałe wplecione w kod poniżej: 6 studów za celem, huśtanie +-4,
+    --  prędkość 2.2 rad/s — mniej lokalnych, bo limit to 200 na funkcję)
+
     local flySpeed = 60
     local walkSpeedVal = 32
     local spinSpeedVal = 50
@@ -658,9 +688,16 @@ function startMainScript()
         ui = {},      -- przycisk/etykieta/suwak (uzupełniane niżej)
     }
 
-    -- SYSTEM MOTYWÓW (THEMES)
-    local currentTheme = "Purple"
+    -- SYSTEM MOTYWÓW (THEMES)  -- MONO = nowy, domyślny motyw: czerń/biel +
+    -- animowany akcent (pętla RenderStepped niżej). Stare motywy zostają.
+    local currentTheme = "Mono"
     local themes = {
+        Mono = {
+            Primary = Color3.fromRGB(245, 245, 245), -- akcent (animowany)
+            Dark = Color3.fromRGB(8, 8, 8),
+            ButtonBg = Color3.fromRGB(26, 26, 26),
+            TextCol = Color3.fromRGB(235, 235, 235)
+        },
         Orange = {
             Primary = Color3.fromRGB(255, 120, 0),
             Dark = Color3.fromRGB(15, 10, 5),
@@ -1005,9 +1042,11 @@ function startMainScript()
 
     local b9 = createButton("Auto Kill All: OFF", 15, "Combat")
     local b10 = createButton("Auto Kill Murder: OFF", 16, "Combat")
-    local b11 = createButton("Target: NONE", 17, "Combat")
-    local b12 = createButton("Fling Target: OFF", 18, "Combat")
+    local b11 = createButton("Target: NONE", 12, "Utility")
+    local b12 = createButton("Fling Target: OFF", 13, "Utility")
     local b13 = createButton("Auto Farm Coins: OFF", 19, "Utility")
+    local bAnnoyTarget = createButton("Annoy Target: NONE", 14, "Utility")
+    local bAnnoy = createButton("Annoy: OFF", 15, "Utility")
 
     local sl4 = Instance.new("TextLabel")
     sl4.Size = UDim2.new(0.95, 0, 0, 12)
@@ -2388,6 +2427,7 @@ function startMainScript()
         if autoKillAll then table.insert(activeList, "• Auto Kill All") end
         if autoKillMurder then table.insert(activeList, "• Auto Kill Murder") end
         if flingTargetEnabled then table.insert(activeList, "• Fling: " .. (targetPlayerName or "Brak")) end
+        if annoyEnabled then table.insert(activeList, "• Annoy: " .. (annoyTargetName or "Brak")) end
         if autoFarmCoins then table.insert(activeList, "• Auto Farm Coins (" .. farmSpeed .. " studs/s)") end
         if tp.on then table.insert(activeList, "• TP Farm (" .. string.format("%.1f", tp.sec) .. "s)") end
         if antiFling then table.insert(activeList, "• Anti-Fling") end
@@ -2462,8 +2502,21 @@ function startMainScript()
                 pBtn.Parent = playerListFrame
 
                 pBtn.MouseButton1Click:Connect(function()
-                    targetPlayerName = p.Name
-                    b11.Text = "Target: " .. p.Name
+                    -- lista graczy obsługuje DWA cele: fling i annoy —
+                    -- targetPickMode mówi, dla kogo kliknięto
+                    if targetPickMode == "annoy" then
+                        annoyTargetName = p.Name
+                        bAnnoyTarget.Text = "Annoy Target: " .. p.Name
+                        if annoyEnabled then
+                            bAnnoy.Text = "Annoy: " .. p.Name
+                        end
+                    else
+                        targetPlayerName = p.Name
+                        b11.Text = "Target: " .. p.Name
+                        if flingTargetEnabled then
+                            b12.Text = "Fling Target: " .. p.Name
+                        end
+                    end
                     playerListFrame.Visible = false
                     updateActiveCheatsList()
                 end)
@@ -2663,6 +2716,16 @@ function startMainScript()
     end)
 
     b11.MouseButton1Click:Connect(function()
+        targetPickMode = "fling"
+        themeListFrame.Visible = false
+        playerListFrame.Visible = not playerListFrame.Visible
+        if playerListFrame.Visible then refreshPlayerList() end
+    end)
+
+    -- ANNOY: OSOBNY CEL (jak fling) — "Annoy Target:" wybiera osobę,
+    -- "Annoy:" włącza/wyłącza pchanie
+    bAnnoyTarget.MouseButton1Click:Connect(function()
+        targetPickMode = "annoy"
         themeListFrame.Visible = false
         playerListFrame.Visible = not playerListFrame.Visible
         if playerListFrame.Visible then refreshPlayerList() end
@@ -2670,7 +2733,8 @@ function startMainScript()
 
     b12.MouseButton1Click:Connect(function()
         flingTargetEnabled = not flingTargetEnabled
-        b12.Text = flingTargetEnabled and "Fling Target: ON" or "Fling Target: OFF"
+        -- przy włączonym flingu pokazujemy kogo flingujemy
+        b12.Text = flingTargetEnabled and ("Fling Target: " .. (targetPlayerName or "?")) or "Fling Target: OFF"
         b12.BackgroundColor3 = flingTargetEnabled and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
         updateActiveCheatsList()
     end)
@@ -2684,6 +2748,7 @@ function startMainScript()
                                      -- mnożyć własnego CFrame (jak spinbot)
 
     runService.Heartbeat:Connect(function()
+        if not isCurrentGen() then return end
         if flingTargetEnabled and targetPlayerName then
             local targetPlayer = playersService:FindFirstChild(targetPlayerName)
             -- HRP bierzemy NA BIEŻĄCO (getHRP): przy respawnie model postaci
@@ -2698,6 +2763,62 @@ function startMainScript()
                 myHrp.RotVelocity = Vector3.new(20000, 20000, 20000)
             end
         end
+    end)
+
+    -- ANNOY: lata za wybraną osobą i huśta się przód-tył za jej plecami.
+    -- Cel = targetPlayerName (ten sam, co "Target:" przycisk).
+    bAnnoy.MouseButton1Click:Connect(function()
+        if not annoyTargetName then
+            -- brak celu: otwieramy listę graczy, żeby go wybrać
+            targetPickMode = "annoy"
+            themeListFrame.Visible = false
+            playerListFrame.Visible = not playerListFrame.Visible
+            if playerListFrame.Visible then refreshPlayerList() end
+            return
+        end
+        annoyEnabled = not annoyEnabled
+        bAnnoy.Text = annoyEnabled and ("Annoy: " .. annoyTargetName) or "Annoy: OFF"
+        bAnnoy.BackgroundColor3 = annoyEnabled and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
+        updateActiveCheatsList()
+    end)
+
+    runService.RenderStepped:Connect(function(dt)
+        if not isCurrentGen() then return end
+        if not annoyEnabled or not annoyTargetName then return end
+        local targetPlayer = playersService:FindFirstChild(annoyTargetName)
+        if not targetPlayer then return end
+        -- HRP na bieżąco: przy respawnie model postaci bywa wymieniany
+        local tHrp = getHRP(targetPlayer.Character)
+        local myHrp = getHRP(plr.Character)
+        if not (tHrp and myHrp) then return end
+
+        -- ANNOY = pchanie kogoś w dupę, ale SPOKOJNE: odsuwamy się od
+        -- gracza na 5 studów i wracamy tuż za niego (coś 1-5 studów),
+        -- płynnym ruchem. Wcześniej było 0.7-1.6 studa i 2.5 studa/klatkę,
+        -- co wyglądało jak fling (teleportowanie) zamiast pchania.
+        annoyPhase = annoyPhase + dt * 6.75        -- ~0.9 s na cykl odsuw-przysuw
+        local push = 3 - 2 * math.cos(annoyPhase) -- 1 - 5 studów za nim
+        local goal = tHrp.Position - tHrp.CFrame.LookVector * push
+        goal = Vector3.new(goal.X, goal.Y - 0.25, goal.Z) -- trochę niżej (pośladki)
+
+        -- ruch: płynnie, bez teleportowania — 1.1 studa na klatkę (68 studs/s),
+        -- to tempo, które nadąża za uciekającą postacią i wygląda naturalnie
+        local offset = goal - myHrp.Position
+        local len = offset.Magnitude
+        if len > 0.02 then
+            if len > 150 then
+                -- cel uciekł o całe mapy (zmiana mapy/respawn) — jeden przeskok
+                myHrp.CFrame = CFrame.lookAt(goal, tHrp.Position)
+            else
+                local step = math.min(len, 150 * dt, 1.4)
+                local newPos = myHrp.Position + offset.Unit * step
+                -- patrzymy w plecy gracza (jakbysmy go pchali)
+                myHrp.CFrame = CFrame.lookAt(newPos, tHrp.Position)
+            end
+        end
+        -- zerowa prędkość = lot, a nie ślizganie się po ziemi
+        myHrp.Velocity = Vector3.new(0, 0, 0)
+        myHrp.RotVelocity = Vector3.new(0, 0, 0)
     end)
 
     -- dragging8 = suwak TP Farma (osobny, żeby nie mieszać się w stan farmy)
@@ -2970,6 +3091,7 @@ function startMainScript()
     -- a strzaly (ray z CFrame kamery) leca dokladnie tam, gdzie patrzy krzyzyk.
     local function tpApply()
         if not thirdPerson then return end
+        if not isCurrentGen() then return end
         -- Caly korpus w pcall + kody na przycisku: zaden powod stopu nie jest cichy.
         -- BloxStrike ma WLASNE postacie (brak Humanoida) — zywotnosc bierzemy
         -- z atrybutu Dead tak jak gra, nie z Health.
@@ -3387,6 +3509,7 @@ function startMainScript()
     -- lokalnych na chunk, a osobny local na helper wywalał kompilację pliku.
     task.spawn(function()
         while true do
+            if not isCurrentGen() then return end
             local ok, err = pcall(function()
                 task.wait(0.02)
                 if tp.on then
@@ -3406,7 +3529,7 @@ function startMainScript()
                         -- KOORDYNACJA farm: Auto Farm ma pierwszeństwo, ALE gdy nie ma
                         -- co zbierać (farmIdle), to TP Farm przejmuje postać. Żadna
                         -- farma nie wyłącza drugiej — obie mogą być włączone naraz.
-                        if killBusy or gunDropRef or (autoFarmCoins and not farmIdle) then
+                        if killBusy or gunDropRef or annoyEnabled or (autoFarmCoins and not farmIdle) then
                             tp.nextAt = now + 0.3  -- odpuść teraz, sprawdź za chwilę
                         else
                         local char = plr.Character
@@ -3512,6 +3635,7 @@ function startMainScript()
 
     task.spawn(function()
         while true do
+            if not isCurrentGen() then return end
             local ok, err = pcall(function()
                 local rawDt = task.wait(0.02)
                 -- ANTI-KICK: dt przycięte — po lag spike'u postać NIE robi dużego
@@ -3626,7 +3750,7 @@ function startMainScript()
                     -- teleportować do monety (obie farmy mogą być ON naraz)
                     farmIdle = (nearestCoin == nil)
 
-                    if killBusy or gunDropRef or tp.walking then
+                    if killBusy or gunDropRef or tp.walking or annoyEnabled then
                         -- KOORDYNACJA: Auto Kill All (killBusy), Auto TP Gun
                         -- (broń leży na ziemi, gunDropRef) albo TP Farm właśnie
                         -- idzie do monety — ktoś steruje CFrame postaci, więc
@@ -3834,6 +3958,7 @@ function startMainScript()
 
     task.spawn(function()
         while true do
+            if not isCurrentGen() then return end
             task.wait(0.1)
             if autoKillMurder and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
                 local gun = plr.Character:FindFirstChildOfClass("Tool")
@@ -3887,6 +4012,7 @@ function startMainScript()
 
     task.spawn(function()
         while true do
+            if not isCurrentGen() then return end
             task.wait(0.1)
             if autoKillAll and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
                 if getRole(plr) == "Murderer" then
@@ -3953,6 +4079,7 @@ function startMainScript()
     end)
 
     runService.RenderStepped:Connect(function()
+        if not isCurrentGen() then return end
         -- HRP na bieżąco (respawn = nowy model bez HumanoidRootPart)
         local hrp = getHRP(plr.Character)
         if spinbotEnabled and hrp then
@@ -4067,6 +4194,7 @@ function startMainScript()
 
     -- Kółko FOV + Aimbot — RenderStepped (PO kamerze gry)
     runService.RenderStepped:Connect(function()
+        if not isCurrentGen() then return end
         -- celuje dopiero przy PPM + rewolwer w ręce (jak BloxStrike)
         local armed = aimbotEnabled and mm2Ppm and getEquippedRevolver() ~= nil
 
@@ -4201,6 +4329,7 @@ function startMainScript()
             originalPos = nil
         end
     end)
+        if not isCurrentGen() then return end
 
     runService.RenderStepped:Connect(function()
         -- Auto TP Gun działa TYLKO dla żywego nie-mordercy: morderca ma nóż
@@ -4253,6 +4382,7 @@ function startMainScript()
             end
         end
     end)
+        if not isCurrentGen() then return end
 
     runService.RenderStepped:Connect(function(dt)
         -- HRP na bieżąco (respawn = nowy model bez HumanoidRootPart)
