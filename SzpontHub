@@ -753,7 +753,7 @@ function startMainScript()
 
     -- SYSTEM MOTYWÓW (THEMES)  -- MONO = nowy, domyślny motyw: czerń/biel +
     -- animowany akcent (pętla RenderStepped niżej). Stare motywy zostają.
-    local currentTheme = "Mono"
+    local currentTheme = "Neon"
     local themes = {
         Mono = {
             Primary = Color3.fromRGB(245, 245, 245), -- akcent (animowany)
@@ -790,6 +790,12 @@ function startMainScript()
             Dark = Color3.fromRGB(5, 10, 15),
             ButtonBg = Color3.fromRGB(10, 20, 25),
             TextCol = Color3.fromRGB(120, 200, 255)
+        },
+        Neon = {
+            Primary = Color3.fromRGB(0, 240, 255),   -- akcent: neonowy cyjan (hue plynie)
+            Dark = Color3.fromRGB(15, 12, 34),       -- tlo: granatowo-fioletowe, nie czarne
+            ButtonBg = Color3.fromRGB(32, 27, 62),   -- przyciski: ciemny fiolet
+            TextCol = Color3.fromRGB(160, 255, 245)
         }
     }
 
@@ -808,7 +814,7 @@ function startMainScript()
     mainFrame.Position = UDim2.new(0.5, -270, 0.5, -310)
     mainFrame.BackgroundColor3 = themes[currentTheme].Dark
     mainFrame.BackgroundTransparency = 0.05
-    mainFrame.BorderSizePixel = 1
+    mainFrame.BorderSizePixel = 0
     mainFrame.BorderColor3 = themes[currentTheme].Primary
     mainFrame.Active = true
     mainFrame.Draggable = true
@@ -818,6 +824,13 @@ function startMainScript()
         local c = Instance.new("UICorner")
         c.CornerRadius = UDim.new(0, 10)
         c.Parent = mainFrame
+        -- Neonowa obwodka zamiast kanciastego BorderColor3: gladka rowniez
+        -- na rogach, gdzie Border nie umi zaokraglic.
+        local s = Instance.new("UIStroke")
+        s.Thickness = 2
+        s.Transparency = 0.15
+        s.Color = themes[currentTheme].Primary
+        s.Parent = mainFrame
     end
 
     local title = Instance.new("TextLabel")
@@ -832,6 +845,13 @@ function startMainScript()
     title.Position = UDim2.new(0, 18, 0, 0)
     title.ZIndex = 2
     title.Parent = mainFrame
+    do
+        -- Gradient na tytule: cyjan -> fiolet, tak jak akcent. Dziala na
+        -- tekscie, bo Color3 z paintTheme mnozy sie z UIGradient.
+        local gr = Instance.new("UIGradient")
+        gr.Color = ColorSequence.new(Color3.fromRGB(0, 255, 225), Color3.fromRGB(195, 90, 255))
+        gr.Parent = title
+    end
 
     -- cienka linia akcentu pod paskiem tytułu (kolor animuje paintTheme)
     do
@@ -3170,6 +3190,13 @@ function startMainScript()
                 c.CornerRadius = UDim.new(0, 6)
                 c.Parent = btn
             end
+            if not btn:FindFirstChildOfClass("UIStroke") then
+                local s = Instance.new("UIStroke")
+                s.Thickness = 1
+                s.Transparency = 0.35
+                s.Color = themes[currentTheme].Primary
+                s.Parent = btn
+            end
             local pad = btn:FindFirstChildOfClass("UIPadding")
             if not pad then
                 pad = Instance.new("UIPadding")
@@ -3203,6 +3230,8 @@ function startMainScript()
 
         mainFrame.BackgroundColor3 = t.Dark
         mainFrame.BorderColor3 = primary
+        local mst = mainFrame:FindFirstChildOfClass("UIStroke")
+        if mst then mst.Color = primary end
         title.TextColor3 = Color3.fromRGB(250, 250, 250)
         -- linia akcentu pod tytułem (animowana razem z motywem)
         local titleLine = mainFrame:FindFirstChild("TitleLine")
@@ -3217,6 +3246,10 @@ function startMainScript()
 
         for _, btn in ipairs(allButtons) do
             btn.BorderColor3 = primary
+            -- Neonowa obwodka: Border umi tylko kanciate, UIStroke gladko
+            -- i zmienia kolor razem z akcentem (paintTheme tynkuje co 0.1 s).
+            local st = btn:FindFirstChildOfClass("UIStroke")
+            if st then st.Color = primary end
             -- przycisk w stanie ON ma kolor akcentu (odkrywamy to po
             -- kolorze, bo przełączniki ustawiają go ręcznie)
             local c = btn.BackgroundColor3
@@ -3283,9 +3316,12 @@ function startMainScript()
 
     runService.RenderStepped:Connect(function(dt)
         if not isCurrentGen() then return end
-        if currentTheme == "Mono" then
+        -- Neon: akcent PLYNIE kolorowo (pelna saturacja). Mono zostaje
+        -- prawie-bialy jak wczesniej - oba maja ruch, ale inny charakter.
+        if currentTheme == "Neon" or currentTheme == "Mono" then
             accentAnim.hue = (accentAnim.hue + dt * 0.07) % 1
-            themes.Mono.Primary = Color3.fromHSV(accentAnim.hue, 0.12, 1)
+            local sat = (currentTheme == "Neon") and 0.85 or 0.12
+            themes[currentTheme].Primary = Color3.fromHSV(accentAnim.hue, sat, 1)
         end
         accentAnim.clock = accentAnim.clock + dt
         if accentAnim.clock >= 0.1 then
@@ -3294,7 +3330,7 @@ function startMainScript()
         end
     end)
 
-    local themeNames = {"Mono", "Orange", "Red", "Purple", "Yellow", "Blue"}
+    local themeNames = {"Neon", "Mono", "Orange", "Red", "Purple", "Yellow", "Blue"}
     for i, tName in ipairs(themeNames) do
         local tBtn = Instance.new("TextButton")
         tBtn.Size = UDim2.new(0.9, 0, 0, 30)
@@ -3978,7 +4014,7 @@ function startMainScript()
     -- STAN WORKA CUKIERKOW: pelny = dalsze latanie po cukierkach nie ma
     -- sensu (serwer podniesienia i tak nie zaliczy). Wtedy flingujemy
     -- morderce. Zegar, nie co klatke - to GUI, a nie model.
-    local farmBag = { full = false, clock = 0 }
+    local farmBag = { full = false, clock = 0, pelny = false, wyl = false, reczny = false }
     -- STAN FLINGU/ANTI-VOID (jedna tablica: Lua ma limit 200 rejestr�w
     -- na funkcje, a osobny local na kazdy parametr wywalal kompilacje).
     --  * safe   = pozycja, z ktorej zaczynalismy fling (tam wracamy)
@@ -4211,28 +4247,77 @@ function startMainScript()
     -- centrum MAPY rundy: najwiekszy model w workspace, ktory NIE jest
     -- lobby ani postacia gracza. Odswiezane co 5 s (bounding box
     -- GetBoundingBox jest tani, ale nie chcemy go liczyc co klik).
-    local mapCenter, mapCenterAt = nil, 0
+    local mapCenter, mapCenterSize, mapCenterAt = nil, nil, 0
     local function getMapCenter()
-        if mapCenter and tick() - mapCenterAt < 5 then return mapCenter end
-        local best, bestVol = nil, 0
+        if mapCenter and tick() - mapCenterAt < 5 then return mapCenter, mapCenterSize end
+        -- "Najwiekszy model na sily" wywalywal na wypizdow: w lobby nie ma
+        -- mapy rundy, wiec bralo jakis losowy wielki model. Teraz najpierw
+        -- pytamy, czy ktokolwiek w ogole jest poza lobby (jak nie - rundy nie
+        -- ma), potem preferujemy model, na ktorym STOJA gracze.
+        local ktosNaMapie = false
+        for _, p in ipairs(playersService:GetPlayers()) do
+            local c = p.Character
+            local h = c and c:FindFirstChild("HumanoidRootPart")
+            if h and not isInLobby(h.Position, 40) then ktosNaMapie = true break end
+        end
+        if not ktosNaMapie then
+            mapCenter, mapCenterAt = nil, tick()
+            return nil
+        end
+        local boxes = getLobbyBoxes()
+        local best, bestScore, bestSize = nil, -1, nil
         for _, obj in ipairs(workspace:GetChildren()) do
             if obj:IsA("Model") and obj ~= workspace.CurrentCamera then
                 local n = obj.Name:lower()
                 if not n:find("lobby") and not n:find("camera")
                     and not playersService:GetPlayerFromCharacter(obj) then
                     local ok, cf, size = pcall(function() return obj:GetBoundingBox() end)
-                    if ok and cf and size then
-                        local vol = size.X * size.Y * size.Z
-                        if vol > bestVol then
-                            bestVol = vol
-                            best = cf.Position
+                    -- >= 40 studow: nie kurz; <= 1500: nie caly swiat/skybox
+                    if ok and cf and size
+                        and size.X >= 40 and size.Z >= 40
+                        and size.X <= 1500 and size.Z <= 1500 then
+                        local wLobby = false
+                        for _, lb in ipairs(boxes) do
+                            local d = cf.Position - lb.cf.Position
+                            if math.abs(d.X) < lb.size.X / 2 + 60
+                                and math.abs(d.Z) < lb.size.Z / 2 + 60 then
+                                wLobby = true
+                                break
+                            end
+                        end
+                        if not wLobby then
+                            -- +10 za kazda postac stojaca na tym modelu
+                            -- (to JEST mapa, na ktorej trwa rozgrywka)
+                            local pkt = 0
+                            for _, p in ipairs(playersService:GetPlayers()) do
+                                local c = p.Character
+                                local h = c and c:FindFirstChild("HumanoidRootPart")
+                                if h then
+                                    local v = h.Position - cf.Position
+                                    if math.abs(v.X) <= size.X / 2
+                                        and math.abs(v.Y) <= size.Y / 2
+                                        and math.abs(v.Z) <= size.Z / 2 then
+                                        pkt = pkt + 10
+                                    end
+                                end
+                            end
+                            pkt = pkt + math.min(size.X * size.Z, 400000) / 10000
+                            if pkt > bestScore then
+                                bestScore = pkt
+                                best = cf
+                                -- BEZ TEGO bestSize zostaje nil i Safe Place
+                                -- wywala sie na size.Y ("index nil with Y")
+                                bestSize = size
+                            end
                         end
                     end
                 end
             end
         end
-        mapCenter, mapCenterAt = best, tick()
-        return best
+        -- Cache w CFramie z rozmiarem: safe place potrzebuje wierzcholka bbox
+        -- mapy, zeby wiedziec, gdzie konczy sie geometria.
+        mapCenter, mapCenterSize, mapCenterAt = best, bestSize, tick()
+        return best, bestSize
     end
 
     local function tpDo(pos, co)
@@ -4280,11 +4365,12 @@ function startMainScript()
     bTpMap.MouseButton1Click:Connect(function()
         local c = getMapCenter()
         if not c then
-            tpSay("Nie widze mapy rundy (lobby?)")
+            tpSay("Brak mapy rundy - wszyscy w lobby")
             return
         end
+        -- getMapCenter zwraca teraz CFrame, wiec bierzemy jego Position;
         -- kolo srodka, nie W srodku: srodek mapy bywa w geometrii
-        tpDo(c + Vector3.new(0, 8, 0), "Teleport na mape")
+        tpDo(c.Position + Vector3.new(0, 8, 0), "Teleport na mape")
     end)
 
     bTpSpawn.MouseButton1Click:Connect(function()
@@ -4307,15 +4393,26 @@ function startMainScript()
         local ch = plr.Character
         local hrp = getHRP(ch)
         if not hrp then return end
-        local y = hrp.Position.Y
-        if voidState.last and y < voidState.last.Y - 30 then
-            -- spadamy: kladziemy platforme WYZEJ, zeby zdazyla zlapac
-            y = voidState.last.Y
+        -- SAFE PLACE = PLATFORMA WYSOKO NAD MAPA. Wczesniej platforma kladla sie
+        -- 4 study POD postacia (efekt "mam podloge pod nogami"), potem na spawnie
+        -- lobby ("nie na spawna"). Teraz: bierzemy srodek mapy rundy i kladziemy
+        -- platforme nad najwyzszym punktem jej geometrii - nikt tam nie dosiegnie,
+        -- a mapa zostaje pod nogami. getMapCenter zwraca teraz CFrame + rozmiar,
+        -- bo do policzenia "nad mapa" potrzebny jest wierzcholek bbox mapy.
+        local cf, size = getMapCenter()
+        -- size tez musi byc: getMapCenter zwraca CFrame + rozmiar bbox mapy,
+        -- a bez rozmiaru nie wiadomo, gdzie konczy sie geometria.
+        if not cf or not size then
+            tpSay("Brak mapy rundy - nie ma gdzie stanac")
+            return
         end
+        -- 80 studow nad dachem mapy: ponad dosiegiem skokow i broni, ale na tyle
+        -- nisko, ze mapa wciaz widac - spadajac wrocisz na teren gry.
+        local nad = cf.Position.Y + size.Y / 2 + 80
         local plat = getSafePlat()
         plat.Parent = workspace
-        plat.Position = Vector3.new(hrp.Position.X, y - 4, hrp.Position.Z)
-        tpDo(plat.Position + Vector3.new(0, 3, 0), "Safe Place: platforma 20x20")
+        plat.Position = Vector3.new(cf.Position.X, nad, cf.Position.Z)
+        tpDo(plat.Position + Vector3.new(0, 3, 0), "Safe Place: nad mape Y" .. math.floor(nad))
     end)
     end
     -- Wywolane od razu, ale W OSCIENNEJ funkcji: Luau ma twardy limit 200
@@ -4726,7 +4823,6 @@ function startMainScript()
                 end
             end
         end
-
         -- 2) wygasanie blokad na monety
         local now = os.clock()
         for coin, untilT in pairs(coinBlacklist) do
@@ -4957,16 +5053,53 @@ function startMainScript()
 
     b9.MouseButton1Click:Connect(function()
         autoKillAll = not autoKillAll
+        -- Tryb reczny: OFF kasuje tez automatyczny "pelny worek" (farmBag.wyl),
+        -- inaczej petla auto-kill w1oczylaby go z powrotem po 0.4 s.
+        farmBag.reczny = autoKillAll
+        farmBag.wyl = not autoKillAll
+        if not autoKillAll then farmBag.pelny = false end
         b9.Text = autoKillAll and "Auto Kill All: ON" or "Auto Kill All: OFF"
         b9.BackgroundColor3 = autoKillAll and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
         updateActiveCheatsList()
     end)
 
     task.spawn(function()
+        -- WOREK WLASNY: auto-kill musi wykrywac pelny worek SAM, bo
+        -- farmBag.full z farmy odswieza sie tylko gdy farma dziala, a ona
+        -- pauzuje przy killBusy - w petli farmy warunek ten nigdy by nie padl.
+        -- Skan co 0.4 s: to GUI (FullBagIcon), a nie model.
+        local bagClock = 0
         while true do
             if not isCurrentGen() then return end
-            if not isCurrentGen() then return end
             task.wait(0.1)
+            bagClock = bagClock + 0.1
+            if bagClock >= 0.4 then
+                bagClock = 0
+                local pelny = false
+                local g = plr.PlayerGui:FindFirstChild("MainGUI")
+                g = g and g:FindFirstChild("Game")
+                g = g and g:FindFirstChild("CoinBags")
+                g = g and g:FindFirstChild("CoinBagContainerScript")
+                if g then
+                    for _, bag in ipairs(g:GetChildren()) do
+                        local icon = bag:FindFirstChild("FullBagIcon")
+                        if icon and icon.Visible then pelny = true break end
+                    end
+                end
+                -- MORDERCA + PELNY WOREK = rzezba wlacza sie sama. autoKillAll
+                -- to tryb reczny z GUI - oba moga dzialac naraz. farmBag.wyl
+                -- ustawia przycisk OFF: blokuje auto do czasu wcisniecia ON.
+                local auto = pelny and not farmBag.wyl and getRole(plr) == "Murderer"
+                if auto ~= farmBag.pelny then
+                    farmBag.pelny = auto
+                    autoKillAll = auto or farmBag.reczny
+                    if b9 and themes and themes[currentTheme] then
+                        b9.Text = autoKillAll and "Auto Kill All: ON" or "Auto Kill All: OFF"
+                        b9.BackgroundColor3 = autoKillAll and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
+                    end
+                    updateActiveCheatsList()
+                end
+            end
             if autoKillAll and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
                 if getRole(plr) == "Murderer" then
                     local knife = plr.Character:FindFirstChildOfClass("Tool")
