@@ -27,13 +27,63 @@ local lighting = game:GetService("Lighting")
 -- pętle widzą, że nie są już aktualne, i same się wyłączają.
 ------------------------------------------------------------
 local SCRIPT_GEN = 0
-if type(getgenv) == "function" then
-    SCRIPT_GEN = (getgenv().SzpontHubGen or 0) + 1
-    getgenv().SzpontHubGen = SCRIPT_GEN
-end
 local function isCurrentGen()
     if type(getgenv) ~= "function" then return true end
     return getgenv().SzpontHubGen == SCRIPT_GEN
+end
+
+------------------------------------------------------------
+-- TEARDOWN: wywołanie skryptu dwa razy ma zostawić ślad tylko w jednym
+-- egzemplarzu. Nowa instancja NAJPIERW woła teardown poprzedniej
+-- (starej): tam wyłączamy wszystkie opcje, przywracamy stan świata
+-- (WalkSpeed, kolizje, obrót, oświetlenie, podświetlenia ESP) i
+-- niszczymy stare GUI. Dopiero potem podbijamy licznik generacji,
+-- czyli starym pętlom zostaje ostatni moment na sprzątanie.
+------------------------------------------------------------
+local function restoreWorldState()
+    pcall(function()
+        local ch = plr and plr.Character
+        if ch then
+            local hum = ch:FindFirstChildOfClass("Humanoid")
+            if hum then
+                hum.WalkSpeed = 16      -- speed hack wyłączony
+                hum.AutoRotate = true   -- spinbot/fly wyłączone
+                hum.PlatformStand = false
+            end
+            for _, p in ipairs(ch:GetChildren()) do
+                if p:IsA("BasePart") then p.CanCollide = true end -- koniec noclipa
+            end
+        end
+        -- pełne światło (fullbright) wraca do tego, co było przed skryptem
+        if type(getgenv) == "function" then
+            local orig = getgenv().SzpontHubOrigLight
+            if orig then
+                lighting.Brightness = orig.brightness
+                lighting.ClockTime = orig.clock
+            end
+        end
+        -- podświetlenia ESP
+        for _, p in ipairs(playersService:GetPlayers()) do
+            if p.Character then
+                local hl = p.Character:FindFirstChild("SzpontESPHighlight")
+                if hl then hl:Destroy() end
+            end
+        end
+    end)
+end
+
+if type(getgenv) == "function" then
+    -- zapamiętuj oryginalne światło (raz, przy pierwszym uruchomieniu)
+    if not getgenv().SzpontHubOrigLight then
+        getgenv().SzpontHubOrigLight = { brightness = lighting.Brightness, clock = lighting.ClockTime }
+    end
+    -- 1) najpierw teardown poprzedniej instancji (sprzątanie)
+    local oldTeardown = getgenv().SzpontHubTeardown
+    if type(oldTeardown) == "function" then pcall(oldTeardown) end
+    getgenv().SzpontHubTeardown = nil
+    -- 2) dopiero teraz ubijamy stare pętle (licznik generacji)
+    SCRIPT_GEN = (getgenv().SzpontHubGen or 0) + 1
+    getgenv().SzpontHubGen = SCRIPT_GEN
 end
 
 ------------------------------------------------------------
@@ -91,6 +141,7 @@ pcall(function()
     if targetParent:FindFirstChild("RivalsFovCircle") then targetParent.RivalsFovCircle:Destroy() end
     if targetParent:FindFirstChild("MM2FovCircle") then targetParent.MM2FovCircle:Destroy() end
     if targetParent:FindFirstChild("LiptonHubWatermark") then targetParent.LiptonHubWatermark:Destroy() end
+    if targetParent:FindFirstChild("LiptonHubBackdrop") then targetParent.LiptonHubBackdrop:Destroy() end
     if game.CoreGui:FindFirstChild("LiptonHubHack") then game.CoreGui.LiptonHubHack:Destroy() end
     if game.CoreGui:FindFirstChild("LiptonHubActiveCheats") then game.CoreGui.LiptonHubActiveCheats:Destroy() end
     if game.CoreGui:FindFirstChild("LiptonHubKeySystem") then game.CoreGui.LiptonHubKeySystem:Destroy() end
@@ -102,6 +153,7 @@ pcall(function()
     if game.CoreGui:FindFirstChild("RivalsFovCircle") then game.CoreGui.RivalsFovCircle:Destroy() end
     if game.CoreGui:FindFirstChild("MM2FovCircle") then game.CoreGui.MM2FovCircle:Destroy() end
     if game.CoreGui:FindFirstChild("LiptonHubWatermark") then game.CoreGui.LiptonHubWatermark:Destroy() end
+    if game.CoreGui:FindFirstChild("LiptonHubBackdrop") then game.CoreGui.LiptonHubBackdrop:Destroy() end
     -- legacy: GUI z poprzednich wersji (stare nazwy) - sprzatanie dla kompatybilnosci
     if targetParent:FindFirstChild("SzpontHack") then targetParent.SzpontHack:Destroy() end
     if targetParent:FindFirstChild("SzpontActiveCheats") then targetParent.SzpontActiveCheats:Destroy() end
@@ -114,114 +166,8 @@ pcall(function()
     if game.CoreGui:FindFirstChild("SzpontGameSelect") then game.CoreGui.SzpontGameSelect:Destroy() end
     if game.CoreGui:FindFirstChild("SzpontSkinChanger") then game.CoreGui.SzpontSkinChanger:Destroy() end
 end)
-
 ------------------------------------------------------------
--- NAPRAWA „ERROR" W EKWIPUNKU GRY — od razu po injekcji, zanim ktokolwiek
--- wejdzie w menu. Gra sama ma błąd kolejności argumentów: AddItem woła
--- CreateItemFrame("Weapons", "DefaultKnife"), a to trafia do
--- GetItemInfo("Weapons", "DefaultKnife"), który czyta Sync[2][1], czyli
--- Sync["DefaultKnife"]["Weapons"] → nil → warn + Materials.ErrorItem,
--- stąd kafelki "Error". Moduł ItemService jest wspólny dla wszystkich
--- require'ów, więc JEDNA podmiana funkcji naprawia ekwipunek gry na stałe.
--- Całość client-side: nie ruszamy remoteów ani danych serwera.
 ------------------------------------------------------------
-do
-    local RS = game:GetService("ReplicatedStorage")
-    -- WAITFORCHILD Z LIMITEM CZASU — NIGDY bez niego!
-    -- ClientServices/ItemService to struktura TYLKO MM2. W BloxStrike,
-    -- Rivals i Fisch tych folderów nie ma, a WaitForChild bez drugiego
-    -- argumentu czeka w nieskończoność. Co gorsza argumenty pcall liczą
-    -- się PRZED wywołaniem, więc ten pcall NIE chronił — skrypt startował
-    -- (dwa printy w konsoli), wieszał się tu na amen i GUI nigdy nie
-    -- powstawało. Objaw: "w MM2 inject działa, w BloxStrike nie".
-    -- Teraz: brak folderu = pomijamy naprawę ekwipunku i lecimy dalej.
-    local CS = RS:WaitForChild("ClientServices", 3)
-    local ISmod = CS and CS:WaitForChild("ItemService", 3)
-    if ISmod then
-        local okIS, IS = pcall(require, ISmod)
-        if okIS and type(IS) == "table" and not IS.__SzpFixed then
-            local DB = RS:WaitForChild("Database", 3)
-            local SyncMod = DB and DB:WaitForChild("Sync", 3)
-            local okSync, Sync = false, nil
-            if SyncMod then okSync, Sync = pcall(require, SyncMod) end
-            if okSync and type(Sync) == "table" then
-                local function fix(fn)
-                    if type(fn) ~= "function" then return fn end
-                    return function(self, a, b)
-                        -- Sync[x] istnieje tylko dla TYPÓW (Weapons/Effects/...),
-                        -- więc po tym poznajemy, który argument jest czym
-                        local aTyp = (type(a) == "string") and (Sync[a] ~= nil)
-                        local bTyp = (type(b) == "string") and (Sync[b] ~= nil)
-                        if aTyp and not bTyp then
-                            return fn(self, b, a)
-                        end
-                        return fn(self, a, b)
-                    end
-                end
-                IS.GetItemInfo = fix(IS.GetItemInfo)
-                IS.FindItemInfo = fix(IS.FindItemInfo)
-                IS.__SzpFixed = true
-            end
-        end
-    end
-end
-
-------------------------------------------------------------
--- WATERMARK (fioletowy): LiptonHub + FPS + ping — W SAMYM PRAWYM GÓRNYM ROGU.
--- IgnoreGuiInset = true => (0,0) GUI = prawdziwy górny róg ekranu (sam sufit).
--- Przy domyślnym false całość schodzi o inset Robloxa (58 px) w dół — stąd
--- wcześniejsza przerwa nad paskiem. Offset X -330 = szerokość 330 => prawa
--- krawędź dokładnie przy prawej ścianie okna.
-------------------------------------------------------------
-local wmGui = Instance.new("ScreenGui")
-wmGui.Name = "LiptonHubWatermark"
-wmGui.ResetOnSpawn = false
-wmGui.IgnoreGuiInset = true
-wmGui.DisplayOrder = 99999
-wmGui.Parent = targetParent
-
-local wmFrame = Instance.new("Frame")
-wmFrame.Size = UDim2.new(0, 330, 0, 26)
-wmFrame.Position = UDim2.new(1, -330, 0, 0)
-wmFrame.BackgroundColor3 = Color3.fromRGB(12, 5, 15)
-wmFrame.BackgroundTransparency = 0.2
-wmFrame.BorderSizePixel = 2
-wmFrame.BorderColor3 = Color3.fromRGB(170, 50, 255)
-wmFrame.Parent = wmGui
-
-local wmLabel = Instance.new("TextLabel")
-wmLabel.Size = UDim2.new(1, -12, 1, 0)
-wmLabel.Position = UDim2.new(0, 6, 0, 0)
-wmLabel.BackgroundTransparency = 1
-wmLabel.Font = Enum.Font.SourceSansBold
-wmLabel.TextSize = 14
-wmLabel.TextColor3 = Color3.fromRGB(210, 150, 255)
-wmLabel.TextXAlignment = Enum.TextXAlignment.Left
-wmLabel.Text = "🔥 LiptonHub 🔥"
-wmLabel.Parent = wmFrame
-
--- FPS: liczymy klatki RenderStepped; ping: Stats.Network "Data Ping" (ms).
--- Odświeżanie 2 razy na sekundę, żeby nie składać stringów co klatkę.
-local wmFrames, wmLast, wmFps = 0, tick(), 0
-local function wmPingMs()
-    local ok, v = pcall(function()
-        return game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue()
-    end)
-    if ok and type(v) == "number" then
-        return tostring(math.floor(v + 0.5))
-    end
-    return "?"
-end
-runService.RenderStepped:Connect(function()
-    wmFrames = wmFrames + 1
-    local now = tick()
-    if now - wmLast >= 0.5 then
-        wmFps = math.floor(wmFrames / (now - wmLast) + 0.5)
-        wmFrames = 0
-        wmLast = now
-        wmLabel.Text = "🔥 LiptonHub 🔥  |  FPS: " .. wmFps .. "  |  Ping: " .. wmPingMs() .. " ms"
-    end
-end)
 
 ------------------------------------------------------------
 -- KEY SYSTEM (POMARAŃCZOWY)
@@ -540,6 +486,115 @@ local function showGameSelect()
         startMainScript()
     end)
 
+------------------------------------------------------------
+-- NAPRAWA „ERROR" W EKWIPUNKU GRY — od razu po injekcji, zanim ktokolwiek
+-- wejdzie w menu. Gra sama ma błąd kolejności argumentów: AddItem woła
+-- CreateItemFrame("Weapons", "DefaultKnife"), a to trafia do
+-- GetItemInfo("Weapons", "DefaultKnife"), który czyta Sync[2][1], czyli
+-- Sync["DefaultKnife"]["Weapons"] → nil → warn + Materials.ErrorItem,
+-- stąd kafelki "Error". Moduł ItemService jest wspólny dla wszystkich
+-- require'ów, więc JEDNA podmiana funkcji naprawia ekwipunek gry na stałe.
+-- Całość client-side: nie ruszamy remoteów ani danych serwera.
+------------------------------------------------------------
+do
+    local RS = game:GetService("ReplicatedStorage")
+    -- WAITFORCHILD Z LIMITEM CZASU — NIGDY bez niego!
+    -- ClientServices/ItemService to struktura TYLKO MM2. W BloxStrike,
+    -- Rivals i Fisch tych folderów nie ma, a WaitForChild bez drugiego
+    -- argumentu czeka w nieskończoność. Co gorsza argumenty pcall liczą
+    -- się PRZED wywołaniem, więc ten pcall NIE chronił — skrypt startował
+    -- (dwa printy w konsoli), wieszał się tu na amen i GUI nigdy nie
+    -- powstawało. Objaw: "w MM2 inject działa, w BloxStrike nie".
+    -- Teraz: brak folderu = pomijamy naprawę ekwipunku i lecimy dalej.
+    local CS = RS:WaitForChild("ClientServices", 3)
+    local ISmod = CS and CS:WaitForChild("ItemService", 3)
+    if ISmod then
+        local okIS, IS = pcall(require, ISmod)
+        if okIS and type(IS) == "table" and not IS.__SzpFixed then
+            local DB = RS:WaitForChild("Database", 3)
+            local SyncMod = DB and DB:WaitForChild("Sync", 3)
+            local okSync, Sync = false, nil
+            if SyncMod then okSync, Sync = pcall(require, SyncMod) end
+            if okSync and type(Sync) == "table" then
+                local function fix(fn)
+                    if type(fn) ~= "function" then return fn end
+                    return function(self, a, b)
+                        -- Sync[x] istnieje tylko dla TYPÓW (Weapons/Effects/...),
+                        -- więc po tym poznajemy, który argument jest czym
+                        local aTyp = (type(a) == "string") and (Sync[a] ~= nil)
+                        local bTyp = (type(b) == "string") and (Sync[b] ~= nil)
+                        if aTyp and not bTyp then
+                            return fn(self, b, a)
+                        end
+                        return fn(self, a, b)
+                    end
+                end
+                IS.GetItemInfo = fix(IS.GetItemInfo)
+                IS.FindItemInfo = fix(IS.FindItemInfo)
+                IS.__SzpFixed = true
+            end
+        end
+    end
+end
+
+------------------------------------------------------------
+-- WATERMARK (fioletowy): LiptonHub + FPS + ping — W SAMYM PRAWYM GÓRNYM ROGU.
+-- IgnoreGuiInset = true => (0,0) GUI = prawdziwy górny róg ekranu (sam sufit).
+-- Przy domyślnym false całość schodzi o inset Robloxa (58 px) w dół — stąd
+-- wcześniejsza przerwa nad paskiem. Offset X -330 = szerokość 330 => prawa
+-- krawędź dokładnie przy prawej ścianie okna.
+------------------------------------------------------------
+local wmGui = Instance.new("ScreenGui")
+wmGui.Name = "LiptonHubWatermark"
+wmGui.ResetOnSpawn = false
+wmGui.IgnoreGuiInset = true
+wmGui.DisplayOrder = 99999
+wmGui.Parent = targetParent
+
+local wmFrame = Instance.new("Frame")
+wmFrame.Size = UDim2.new(0, 330, 0, 26)
+wmFrame.Position = UDim2.new(1, -330, 0, 0)
+wmFrame.BackgroundColor3 = Color3.fromRGB(12, 5, 15)
+wmFrame.BackgroundTransparency = 0.2
+wmFrame.BorderSizePixel = 2
+wmFrame.BorderColor3 = Color3.fromRGB(170, 50, 255)
+wmFrame.Parent = wmGui
+
+local wmLabel = Instance.new("TextLabel")
+wmLabel.Size = UDim2.new(1, -12, 1, 0)
+wmLabel.Position = UDim2.new(0, 6, 0, 0)
+wmLabel.BackgroundTransparency = 1
+wmLabel.Font = Enum.Font.SourceSansBold
+wmLabel.TextSize = 14
+wmLabel.TextColor3 = Color3.fromRGB(210, 150, 255)
+wmLabel.TextXAlignment = Enum.TextXAlignment.Left
+wmLabel.Text = "🔥 LiptonHub 🔥"
+wmLabel.Parent = wmFrame
+
+-- FPS: liczymy klatki RenderStepped; ping: Stats.Network "Data Ping" (ms).
+-- Odświeżanie 2 razy na sekundę, żeby nie składać stringów co klatkę.
+local wmFrames, wmLast, wmFps = 0, tick(), 0
+local function wmPingMs()
+    local ok, v = pcall(function()
+        return game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue()
+    end)
+    if ok and type(v) == "number" then
+        return tostring(math.floor(v + 0.5))
+    end
+    return "?"
+end
+runService.RenderStepped:Connect(function()
+    if not isCurrentGen() then return end
+    wmFrames = wmFrames + 1
+    local now = tick()
+    if now - wmLast >= 0.5 then
+        wmFps = math.floor(wmFrames / (now - wmLast) + 0.5)
+        wmFrames = 0
+        wmLast = now
+        wmLabel.Text = "🔥 LiptonHub 🔥  |  FPS: " .. wmFps .. "  |  Ping: " .. wmPingMs() .. " ms"
+    end
+end)
+
     bsBtn.MouseButton1Click:Connect(function()
         gameSelectGui:Destroy()
         startBloxStrikeScript()
@@ -596,7 +651,26 @@ function startMainScript()
     local mm2Ppm = false    -- stan PPM: InputBegan/InputEnded (bez gp)
 
     local targetPlayerName = nil
+    -- forward declaration: updateActiveCheatsList jest uzywana w
+    -- handlerach przyciskow (bFarmLegit) zanim ja zdefiniujemy -
+    -- bez tego handler dostaje nil i wywala "attempt to call a nil value".
+    local updateActiveCheatsList
     local flingTargetEnabled = false
+    -- FLING MORDERCY PO PELNYM WORKU: gdy Auto Farm Coins nie ma juz co
+    -- zbierac (worek cukierkow pelny), a my jestesmy Innocent/Sheriff,
+    -- lecimy do mordercy i flingujemy go. Osobna opcja, bo dotyczylaby
+    -- kazdego wlaczenia farmy - a nie kazdy chce, zeby mu po pelnym worku
+    -- rzucalo postacia zamiast spokojnie stac.
+    local flingMurderFull = true   -- domyslnie ON: takie bylo zyczenie
+    -- ROLASWE FLINGI: zamiast recznie wybierac osobe z listy, mozna
+    -- flingowac ROLE - cel zmienia sie sam, gdy zmienia sie rola.
+    -- Niezalezne od Fling Target (reczny) i od flingAuto (worek pelny).
+    local roleFlags = { sheriff = false, murderer = false, void = false }
+    local roleBtns = {}      -- przyciski rolaswe w jednej tablicy (limit 200 rej.)
+    -- ANTI-VOID: spadanie pod mape nie zabija - postac wraca na ostatnia
+    -- pozycje na ziemi (albo do spawnu lobby, gdy jeszcze nigdy nie stala
+    -- na ziemi poza lobby).
+    -- (deklaracje scalone wyzej - patrz roleFlags)
 
     -- ANNOY: lata za wybraną osobą (annoyTargetName) i huśta się do przodu
     -- i do tyłu za jej plecami. MA WŁASNY CEL (przycisk "Annoy Target:"),
@@ -614,37 +688,30 @@ function startMainScript()
     local spinSpeedVal = 50
     local farmSpeed = 17
 
-    -- UNIKANIE MORDERCY przy Auto Farm Coins: morderca chodzi z nożem i
     -- dobiega, więc farma ma trzymać dystans. Suwak 1-50 studów.
-    local farmAvoidDist = 15
     local farmUi = {}   -- suwak dystansu (jedna tablica zamiast 3 locali:
+    local farmLegit = false       -- tryb "chodzaca" farma (silnik) vs. domyslna lot (CFrame)
+    local farmSpeedLimit = 100     -- efektywna predkosc lotu (farma zwalnia, gdy serwer cofa ruch)
                         -- Lua ma limit 200 rejestrów na chunk)
 
-    -- AUTO FARM: progi bezpieczeństwa (opis w sekcji AUTO FARM COINS v3)
-    -- FARM_SAFE_SPEED_CAP: górna granica suwaka prędkości farmy. Wcześniej
-    -- stała tu 24 i dlatego suwak "Farm Speed" NIC NIE ROBIŁ powyżej 25 —
-    -- farma i tak jechała 24 studs/s. Teraz suwak jest HONOROWANY w całym
-    -- zakresie 5-100.
-    -- UWAGA: ruch farmy idzie przez CFrame, a MM2 odrzuca ("Invalid position",
-    -- Error 267) skoki powyżej ~25-30 studs/s. Dlatego:
-    --   * powyżej 30 studs/s dostajesz ostrzeżenie w etykiecie suwaka,
-    --   * FARM_MAX_STEP limituje krok na tick, żeby po lagu nie było skoku,
-    --   * jeśli dostaniesz kicka — obniż suwak albo użyj TP Farm (on jedzie
-    --     WalkSpeed'em i ~200 studs/s przechodzi bez problemu).
-    local FARM_SAFE_SPEED_CAP = 100
-    local FARM_KICK_RISK_SPEED = 30   -- od tej wartości serwer może odmówić
-    local FARM_MAX_STEP = 2.0         -- twardy limit kroku na tick (studs)
-    local FARM_DT_CLAMP = 0.05      -- lag > 50 ms liczymy jako 50 ms
+    -- AUTO FARM: progi (opis w sekcji AUTOFARM v4)
+    -- Prędkość: suwak 1-100 = 1-100 studs/s. Ruch idzie SILNIKIEM
+    -- (Humanoid.WalkSpeed), więc serwer go akceptuje i NIE MA
+    -- "Invalid position" - pozycję zmienia silnik, a nie CFrame.
+    local FARM_MAX_STEP = 2.0         -- max krok na klatkę (studs) - mały, więc serwer nie odrzuca
     local FARM_STUCK_TIME = 3       -- sekundy stania przy monecie bez efektu
     local FARM_BLACKLIST_TIME = 20  -- jak długo moneta jest ignorowana po "stuck"
-    -- PANIKA: bliżej niż ta odległość (studów) morderca jest ZA BLISKO —
-    -- farma rzuca cukierki i ucieka. Dalej (aż do suwaka "Murder Dist")
-    -- farma dalej ZBIERA, tylko kierunek ruchu jest mieszany z ucieczką.
-    -- Stary kod uciekał odrazu i przez to NIE ZBIERAŁ NIC (same ucieczki).
-    local FARM_PANIC_DIST = 8
-    local FARM_SCAN_INTERVAL = 1    -- odświeżenie listy żywych monet (s)
-    local FARM_EMPTY_SCAN_INTERVAL = 0.75 -- rzadsze odświeżenie, gdy lista pusta
+    -- PANIKA: morderca z nożem bliżej niż ta odległość (studów) → farma
+    -- wstrzymuje się. Dalej morderca NIE przeszkadza w zbieraniu.
+    local farmPanicDist = 6       -- morderca blizej niz to → farma stoi (suwak)
+    local FARM_SCAN_INTERVAL = 0.3 -- odswiezenie listy zywych monet (s) - czesciej,
+    --       zeby farma nie leciala po "fantomach" monet zebranych przez kogos
     local FARM_TARGET_RANGE = 200   -- ignorujemy monety dalej niż X studs
+    -- TWARDY LIMIT PREDKOSCI LOTU: lot juz NIE teleportuje, wiec predkosc idzie
+    -- przez silnik - a za bardzo wysoki WalkSpeed serwer tez potrafi wywalic.
+    -- 45 stud/s to ~3x normalny chod, wystarczajaco szybkie i na tyle spokojne,
+    -- ze anti-cheat MM2 tego nie rusza. Wiecej = ryzyko kopniecia.
+    local FARM_FLY_MAX_SPEED = 45
 
     -- ZBIERANIE PODCZAS UCIECZKI: stary kod przy mordercy blisko uciekał i
     -- sterczał w miejscu — cukierki/monety leżące po drodze przepadały, a
@@ -657,10 +724,6 @@ function startMainScript()
     --   FARM_ESCAPE_GRAB_NEAR  -- tak blisko, że łapanie jest praktycznie za darmo
     --   FARM_ESCAPE_GRAB_TIME  -- ile sekund z rzędu wolno próbować dobiec do celu
     --                             (potem przerwa, by morderca nas dogonił)
-    local FARM_ESCAPE_GRAB_RANGE = 30
-    local FARM_ESCAPE_SAFE_DOT  = 0.1
-    local FARM_ESCAPE_GRAB_NEAR = 3
-    local FARM_ESCAPE_GRAB_TIME = 1.2
 
     -- TP FARM: "teleport" do monety co tp.sec sekund (suwak 0.5-5.0 s).
     -- ANTI-KICK "Invalid position" (Error 267): MM2 kopało za KAŻDĄ próbę
@@ -1045,6 +1108,49 @@ function startMainScript()
     local b11 = createButton("Target: NONE", 12, "Utility")
     local b12 = createButton("Fling Target: OFF", 13, "Utility")
     local b13 = createButton("Auto Farm Coins: OFF", 19, "Utility")
+    local bFarmLegit = createButton("Auto Farm Legit: OFF", 18, "Utility")
+    local bFlingFull = createButton("Fling Murderer (Full Bag): ON", 20, "Utility")
+    bFlingFull.MouseButton1Click:Connect(function()
+        flingMurderFull = not flingMurderFull
+        bFlingFull.Text = flingMurderFull and "Fling Murderer (Full Bag): ON" or "Fling Murderer (Full Bag): OFF"
+        bFlingFull.BackgroundColor3 = flingMurderFull and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
+        updateActiveCheatsList()
+    end)
+    -- ROLASWE FLINGI: cel zmienia sie sam, gdy zmienia sie rola - nie trzeba
+    -- co runde wybierac kogo z listy graczy. Niezalezne od "Fling Target"
+    -- (reczny) i od "Fling Murderer (Full Bag)" (auto po pelnym worku).
+    roleBtns.sheriff = createButton("Fling Sheriff: OFF", 16, "Utility")
+    roleBtns.murderer = createButton("Fling Murderer: OFF", 17, "Utility")
+    roleBtns.sheriff.MouseButton1Click:Connect(function()
+        roleFlags.sheriff = not roleFlags.sheriff
+        roleBtns.sheriff.Text = roleFlags.sheriff and "Fling Sheriff: ON" or "Fling Sheriff: OFF"
+        roleBtns.sheriff.BackgroundColor3 = roleFlags.sheriff and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
+        updateActiveCheatsList()
+    end)
+    roleBtns.murderer.MouseButton1Click:Connect(function()
+        roleFlags.murderer = not roleFlags.murderer
+        roleBtns.murderer.Text = roleFlags.murderer and "Fling Murderer: ON" or "Fling Murderer: OFF"
+        roleBtns.murderer.BackgroundColor3 = roleFlags.murderer and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
+        updateActiveCheatsList()
+    end)
+    bFarmLegit.MouseButton1Click:Connect(function()
+        farmLegit = not farmLegit
+        -- przelaczenie z "LOT" (noclip) na "chodzenie" przy WLACZONEJ farmie:
+        -- trzeba oddac kolizje, bo silnik bez niej przelatuje przez podloge
+        if farmLegit and autoFarmCoins then
+            local ch = plr.Character
+            if ch then
+                for _, part in ipairs(ch:GetChildren()) do
+                    if part:IsA("BasePart") and not part.CanCollide then
+                        part.CanCollide = true
+                    end
+                end
+            end
+        end
+        bFarmLegit.Text = farmLegit and "Auto Farm Legit: ON" or "Auto Farm Legit: OFF"
+        bFarmLegit.BackgroundColor3 = farmLegit and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
+        updateActiveCheatsList()
+    end)
     local bAnnoyTarget = createButton("Annoy Target: NONE", 14, "Utility")
     local bAnnoy = createButton("Annoy: OFF", 15, "Utility")
 
@@ -1124,7 +1230,7 @@ function startMainScript()
     farmUi.lbl.TextColor3 = themes[currentTheme].TextCol
     farmUi.lbl.TextSize = 11
     farmUi.lbl.Font = Enum.Font.SourceSansBold
-    farmUi.lbl.Text = "Murder Dist: 15"
+    farmUi.lbl.Text = "Panika (morderca): 6"
     farmUi.lbl.LayoutOrder = 32
     farmUi.lbl.ZIndex = 3
     farmUi.lbl.Parent = pages["Utility"]
@@ -1151,6 +1257,9 @@ function startMainScript()
     table.insert(allFrames, farmUi.fill)
 
     local b14 = createButton("Anti-Fling: OFF", 22, "Utility")
+    -- ANTI-VOID obok Anti-Fling (22), bo obie bronia przed "utkaniem"
+    -- poza mapa - tyle ze ta przed SMIERCIA ze spadania, nie przed pchaniem.
+    roleBtns.void = createButton("Anti-Void: OFF", 21, "Utility")
     local b15 = createButton("Anti-AFK: OFF", 23, "Utility")
     local b16 = createButton("Fullbright: OFF", 24, "Visuals")
     local bThemeToggle = createButton("Theme: Purple", 25, "Utility")
@@ -1305,6 +1414,13 @@ function startMainScript()
     tbSkins.ZIndex = 3
     tbSkins.Parent = sidebar
     tabButtons["Skins"] = tbSkins
+
+    -- ============================================================
+    -- ZAKŁADKA CONFIGS: zapis konfiguracji na dysk użytkownika
+    -- (plik JSON w workspace executora) + wczytanie przy starcie.
+    -- "Save Config" zapisuje AKTUALNY stan opcji, a przy kolejnym
+    -- uruchomieniu skryptu config jest wczytywany automatycznie.
+    -- ============================================================
 
     local function rarityColor(name)
         local c = name and rarityColors[name]
@@ -1898,6 +2014,7 @@ function startMainScript()
         -- walkę przerywamy natychmiast, gdy w ręce pojawi się COŚ INNEGO —
         -- nie odbieramy Ci prawdziwej broni
         task.spawn(function()
+            if not isCurrentGen() then return end
             while tool.Parent and tool:GetAttribute("SzpLocalSkin") and ch.Parent do
                 task.wait(0.5)
                 if tool.Parent == bp then
@@ -2410,7 +2527,51 @@ function startMainScript()
     local thirdPerson = false
     local tpDist = 10
 
-    local function updateActiveCheatsList()
+    -- TEARDOWN instancji: jesli skrypt zostanie wykonany drugi raz, nowa
+    -- instancja wywola to i stara wersja sprzata po sobie - najpierw
+    -- wylacza WSZYSTKIE opcje, potem przywraca stan swiata (WalkSpeed,
+    -- kolizje, obrot, swiatlo, ESP) i niszczy swoje GUI.
+    -- UWAGA: rejestrujemy to TUTAJ (a nie na koncu funkcji), bo ta funkcja
+    -- jest ogromna i jej koniec nie zawsze jest osiagany.
+    if type(getgenv) == "function" then
+        getgenv().SzpontHubTeardown = function()
+            pcall(function()
+                -- 1) wszystkie opcje OFF
+                flying = false
+                noclip = false
+                speedHack = false
+                espEnabled = false
+                autoGunTP = false
+                triggerbot = false
+                altQuitEnabled = false
+                spinbotEnabled = false
+                autoKillAll = false
+                autoKillMurder = false
+                flingTargetEnabled = false
+                autoFarmCoins = false
+                flingMurderFull = false
+                roleFlags.sheriff = false
+                roleFlags.murderer = false
+                roleFlags.void = false
+                annoyEnabled = false
+                antiFling = false
+                antiAfk = false
+                fullbrightEnabled = false
+                hitboxExpander = false
+                aimbotEnabled = false
+                thirdPerson = false
+                mm2Ppm = false
+                if tp then tp.on = false end
+                -- 2) stan swiata (WalkSpeed, kolizje, obrot, swiatlo, ESP)
+                restoreWorldState()
+                -- 3) stare GUI znikaja
+                if g then g:Destroy() end
+                if activeCheatsGui then activeCheatsGui:Destroy() end
+            end)
+        end
+    end
+
+    updateActiveCheatsList = function()
         for _, child in pairs(cheatsScroll:GetChildren()) do
             if child:IsA("TextLabel") then child:Destroy() end
         end
@@ -2429,6 +2590,10 @@ function startMainScript()
         if flingTargetEnabled then table.insert(activeList, "• Fling: " .. (targetPlayerName or "Brak")) end
         if annoyEnabled then table.insert(activeList, "• Annoy: " .. (annoyTargetName or "Brak")) end
         if autoFarmCoins then table.insert(activeList, "• Auto Farm Coins (" .. farmSpeed .. " studs/s)") end
+        if autoFarmCoins and flingMurderFull then table.insert(activeList, "Fling mordercy (worek pelny)") end
+        if roleFlags.sheriff then table.insert(activeList, "Fling Sheriff") end
+        if roleFlags.murderer then table.insert(activeList, "Fling Murderer") end
+        if roleFlags.void then table.insert(activeList, "Anti-Void") end
         if tp.on then table.insert(activeList, "• TP Farm (" .. string.format("%.1f", tp.sec) .. "s)") end
         if antiFling then table.insert(activeList, "• Anti-Fling") end
         if antiAfk then table.insert(activeList, "• Anti-AFK") end
@@ -2460,6 +2625,452 @@ function startMainScript()
 
         cheatsScroll.CanvasSize = UDim2.new(0, 0, 0, #activeList * 30)
     end
+    local cfg = {
+        file = "SzpontHubConfig.json",
+        http = game:GetService("HttpService"),
+        info = nil,
+    }
+
+    -- odswieżenie GUI po wczytaniu configu (przyciski + etykiety suwaków)
+    function cfg.refresh()
+        local t = themes[currentTheme]
+        local function mark(btn, on, onTxt, offTxt)
+            if not btn then return end
+            btn.Text = on and onTxt or offTxt
+            btn.BackgroundColor3 = on and t.Primary or t.ButtonBg
+        end
+        mark(b1, flying, "Fly: ON", "Fly: OFF")
+        mark(b2, noclip, "Noclip: ON", "Noclip: OFF")
+        mark(b3, speedHack, "Speed Hack: ON", "Speed Hack: OFF")
+        mark(b4, espEnabled, "ESP: ON", "ESP: OFF")
+        mark(b5, autoGunTP, "Auto TP Gun: ON", "Auto TP Gun: OFF")
+        mark(b6, triggerbot, "Triggerbot: ON", "Triggerbot: OFF")
+        mark(b7, altQuitEnabled, "Alt-Quit: ON", "Alt-Quit: OFF")
+        mark(b8, spinbotEnabled, "Spinbot: ON", "Spinbot: OFF")
+        mark(b9, autoKillAll, "Auto Kill All: ON", "Auto Kill All: OFF")
+        mark(b10, autoKillMurder, "Auto Kill Murder: ON", "Auto Kill Murder: OFF")
+        mark(b12, flingTargetEnabled, "Fling Target: " .. (targetPlayerName or "?"), "Fling Target: OFF")
+        mark(b13, autoFarmCoins, "Auto Farm Coins: ON", "Auto Farm Coins: OFF")
+        if bFarmLegit then mark(bFarmLegit, farmLegit, "Auto Farm Legit: ON", "Auto Farm Legit: OFF") end
+        if bFlingFull then mark(bFlingFull, flingMurderFull, "Fling Murderer (Full Bag): ON", "Fling Murderer (Full Bag): OFF") end
+        if roleBtns.sheriff then mark(roleBtns.sheriff, roleFlags.sheriff, "Fling Sheriff: ON", "Fling Sheriff: OFF") end
+        if roleBtns.murderer then mark(roleBtns.murderer, roleFlags.murderer, "Fling Murderer: ON", "Fling Murderer: OFF") end
+        if roleBtns.void then mark(roleBtns.void, roleFlags.void, "Anti-Void: ON", "Anti-Void: OFF") end
+        mark(b14, antiFling, "Anti-Fling: ON", "Anti-Fling: OFF")
+        mark(b15, antiAfk, "Anti-AFK: ON", "Anti-AFK: OFF")
+        mark(b16, fullbrightEnabled, "Fullbright: ON", "Fullbright: OFF")
+        mark(b17, hitboxExpander, "Hitbox Murderer: ON", "Hitbox Murderer: OFF")
+        mark(bTP, thirdPerson, "Third Person: ON", "Third Person: OFF")
+        mark(tp.ui.btn, tp.on, "TP Farm: ON", "TP Farm: OFF")
+        mark(bAnnoy, annoyEnabled, "Annoy: " .. (annoyTargetName or "?"), "Annoy: OFF")
+        if sl1 then sl1.Text = "Fly Speed: " .. flySpeed end
+        if sl2 then sl2.Text = "Walk Speed: " .. walkSpeedVal end
+        if sl3 then sl3.Text = "Spin Speed: " .. spinSpeedVal end
+        if sl4 then sl4.Text = "Farm Speed: " .. farmSpeed end
+        if sl5 then sl5.Text = "Hitbox Size: " .. hitboxSizeVal end
+        if slAimFov then slAimFov.Text = "Aimbot FOV: " .. aimbotFov end
+        if slAimSpeed then slAimSpeed.Text = "Aimbot Speed: " .. aimbotSpeed end
+        if tp.ui.lbl then tp.ui.lbl.Text = "TP Time: " .. string.format("%.1f", tp.sec) .. "s" end
+        if farmUi.lbl then farmUi.lbl.Text = "Panika (morderca): " .. farmPanicDist end
+        updateActiveCheatsList()
+    end
+
+    -- wczytanie configu z dysku (brak pliku = brak zmian)
+    function cfg.apply(data)
+        if type(data) ~= "table" then return false end
+        autoFarmCoins = data.autoFarmCoins == true
+        farmSpeed = data.farmSpeed or farmSpeed
+        farmLegit = data.farmLegit == true
+        espEnabled = data.espEnabled == true
+        antiAfk = data.antiAfk == true
+        fullbrightEnabled = data.fullbrightEnabled == true
+        flying = data.flying == true
+        noclip = data.noclip == true
+        speedHack = data.speedHack == true
+        walkSpeedVal = data.walkSpeedVal or walkSpeedVal
+        spinbotEnabled = data.spinbotEnabled == true
+        spinSpeedVal = data.spinSpeedVal or spinSpeedVal
+        triggerbot = data.triggerbot == true
+        autoGunTP = data.autoGunTP == true
+        autoKillAll = data.autoKillAll == true
+        autoKillMurder = data.autoKillMurder == true
+        flingTargetEnabled = data.flingTargetEnabled == true
+        targetPlayerName = data.targetPlayerName
+        annoyEnabled = data.annoyEnabled == true
+        annoyTargetName = data.annoyTargetName
+        hitboxExpander = data.hitboxExpander == true
+        hitboxSizeVal = data.hitboxSizeVal or hitboxSizeVal
+        aimbotEnabled = data.aimbotEnabled == true
+        aimbotFov = data.aimbotFov or aimbotFov
+        aimbotSpeed = data.aimbotSpeed or aimbotSpeed
+        thirdPerson = data.thirdPerson == true
+        tpDist = data.tpDist or tpDist
+        farmPanicDist = data.farmPanicDist or farmPanicDist
+        flingMurderFull = data.flingMurderFull ~= false
+        -- "= false" zamiast "== true": stare configi nie maja tych pol,
+        -- a traktowanie braku jako ON dawaloby fling wszedzie po wczytaniu.
+        roleFlags.sheriff = data.flingSheriff == true
+        roleFlags.murderer = data.flingMurderer == true
+        roleFlags.void = data.antiVoid == true
+        tp.on = data.tpOn == true
+        tp.sec = data.tpSec or tp.sec
+        cfg.refresh()
+        return true
+    end
+
+    -- ZBIERZ AKTUALNY STAN OPCJI (do zapisu w configu)
+    function cfg.collect()
+        return {
+            autoFarmCoins = autoFarmCoins, farmSpeed = farmSpeed, farmLegit = farmLegit,
+            espEnabled = espEnabled, antiAfk = antiAfk, fullbrightEnabled = fullbrightEnabled,
+            flying = flying, noclip = noclip, speedHack = speedHack, walkSpeedVal = walkSpeedVal,
+            spinbotEnabled = spinbotEnabled, spinSpeedVal = spinSpeedVal, triggerbot = triggerbot,
+            autoGunTP = autoGunTP, autoKillAll = autoKillAll, autoKillMurder = autoKillMurder,
+            flingTargetEnabled = flingTargetEnabled, targetPlayerName = targetPlayerName,
+            annoyEnabled = annoyEnabled, annoyTargetName = annoyTargetName,
+            hitboxExpander = hitboxExpander, hitboxSizeVal = hitboxSizeVal,
+            aimbotEnabled = aimbotEnabled, aimbotFov = aimbotFov, aimbotSpeed = aimbotSpeed,
+            thirdPerson = thirdPerson, tpDist = tpDist, farmPanicDist = farmPanicDist,
+            tpOn = tp.on, tpSec = tp.sec,
+            flingMurderFull = flingMurderFull,
+            sheriff = roleFlags.sheriff, murderer = roleFlags.murderer, antiVoid = roleFlags.void,
+        }
+    end
+
+    -- WCZYTANIE LISTY CONFIGOW Z DYSKU (stary format = jeden config)
+    function cfg.loadAll()
+        local ok, data = pcall(function()
+            if type(readfile) ~= "function" then return nil end
+            local raw = readfile(cfg.file)
+            if type(raw) ~= "string" or raw == "" then return nil end
+            return cfg.http:JSONDecode(raw)
+        end)
+        if not (ok and type(data) == "table") then
+            cfg.configs = {}
+            return false
+        end
+        if type(data.configs) == "table" then
+            cfg.configs = data.configs
+        else
+            -- stary plik (plaski config) -> import jako "Config 1"
+            cfg.configs = { { name = "Config 1", data = data } }
+        end
+        return true
+    end
+
+    -- ZAPIS LISTY CONFIGOW NA DYSK UZYTKOWNIKA
+    function cfg.saveAll()
+        local ok, err = pcall(function()
+            if type(writefile) ~= "function" then error("brak writefile") end
+            writefile(cfg.file, cfg.http:JSONEncode({ configs = cfg.configs }))
+        end)
+        return ok, err
+    end
+
+    -- ZAPIS CONFIGU POD NAZWA (ta sama nazwa = nadpisanie)
+    function cfg.saveNamed(name)
+        if type(name) ~= "string" or name == "" then
+            name = "Config " .. tostring(#cfg.configs + 1)
+        end
+        local data = cfg.collect()
+        local replaced = false
+        for i, entry in ipairs(cfg.configs) do
+            if entry.name == name then
+                cfg.configs[i] = { name = name, data = data }
+                replaced = true
+                break
+            end
+        end
+        if not replaced then
+            table.insert(cfg.configs, { name = name, data = data })
+        end
+        local ok, err = cfg.saveAll()
+        cfg.refreshList()
+        return ok, err
+    end
+
+    -- USUNIECIE CONFIGU PO NAZWIE
+    function cfg.delete(name)
+        for i, entry in ipairs(cfg.configs) do
+            if entry.name == name then
+                table.remove(cfg.configs, i)
+                break
+            end
+        end
+        local ok, err = cfg.saveAll()
+        cfg.refreshList()
+        return ok, err
+    end
+
+    -- LISTA ZAPISANYCH CONFIGOW (klik w nazwe = wczytanie, "x" = usuniecie)
+    function cfg.refreshList()
+        if not cfg.list then return end
+        for _, c in ipairs(cfg.list:GetChildren()) do
+            if c:IsA("GuiObject") then c:Destroy() end
+        end
+        for i, entry in ipairs(cfg.configs) do
+            local row = Instance.new("Frame")
+            row.Name = "Row" .. i
+            row.Size = UDim2.new(1, 0, 0, 26)
+            row.BackgroundTransparency = 1
+            row.LayoutOrder = i
+            row.ZIndex = 3
+            row.Parent = cfg.list
+            local loadBtn = Instance.new("TextButton")
+            loadBtn.Name = "Load"
+            loadBtn.Size = UDim2.new(1, -30, 1, 0)
+            loadBtn.BackgroundColor3 = themes[currentTheme].ButtonBg
+            loadBtn.BackgroundTransparency = 0
+            loadBtn.BorderSizePixel = 0
+            loadBtn.Text = entry.name
+            loadBtn.TextColor3 = Color3.fromRGB(240, 240, 240)
+            loadBtn.Font = Enum.Font.Gotham
+            loadBtn.TextSize = 12
+            loadBtn.TextXAlignment = Enum.TextXAlignment.Left
+            loadBtn.ZIndex = 4
+            loadBtn.Parent = row
+            local delBtn = Instance.new("TextButton")
+            delBtn.Name = "Del"
+            delBtn.Size = UDim2.new(0, 24, 1, 0)
+            delBtn.Position = UDim2.new(1, -24, 0, 0)
+            delBtn.BackgroundColor3 = themes[currentTheme].ButtonBg
+            delBtn.BackgroundTransparency = 0
+            delBtn.BorderSizePixel = 0
+            delBtn.Text = "x"
+            delBtn.TextColor3 = Color3.fromRGB(255, 120, 120)
+            delBtn.Font = Enum.Font.GothamBold
+            delBtn.TextSize = 12
+            delBtn.ZIndex = 4
+            delBtn.Parent = row
+            loadBtn.MouseButton1Click:Connect(function()
+                cfg.apply(entry.data)
+                cfg.info.Text = "Wczytano config: " .. entry.name
+            end)
+            delBtn.MouseButton1Click:Connect(function()
+                cfg.delete(entry.name)
+                cfg.info.Text = "Usunieto config: " .. entry.name
+            end)
+        end
+    end
+
+    -- DEFAULT (ogólny): ESP + speed hack 19 + fullbright + auto TP gun
+    function cfg.default()
+        cfg.apply({
+            espEnabled = true,
+            speedHack = true, walkSpeedVal = 19,
+            fullbrightEnabled = true,
+            autoGunTP = true,
+        })
+    end
+
+    -- AUTOFARM: autofarm (szybkość 24) + ESP + anti-AFK + fullbright
+    function cfg.defaultAutoFarm()
+        cfg.apply({
+            autoFarmCoins = true, farmSpeed = 24,
+            espEnabled = true,
+            antiAfk = true,
+            fullbrightEnabled = true,
+        })
+    end
+
+    -- zakładka Configs w lewym pasku
+    makePage("Configs")
+    local tbCfg = Instance.new("TextButton")
+    tbCfg.Name = "ConfigTab"
+    tbCfg.Size = UDim2.new(0, 134, 0, 36)
+    tbCfg.BackgroundColor3 = themes[currentTheme].ButtonBg
+    tbCfg.BackgroundTransparency = 0
+    tbCfg.BorderSizePixel = 0
+    tbCfg.Text = "Configs"
+    tbCfg.TextColor3 = Color3.fromRGB(235, 235, 235)
+    tbCfg.TextSize = 14
+    tbCfg.Font = Enum.Font.GothamSemibold
+    tbCfg.LayoutOrder = 6
+    tbCfg.ZIndex = 3
+    tbCfg.Parent = sidebar
+    tabButtons["Configs"] = tbCfg
+    -- klik w zakladke = przejście na strone Configs (bez tego przycisk
+    -- wygladzal jak zakladka, ale nic nie robil)
+    tbCfg.MouseButton1Click:Connect(function()
+    local cfgPrevTab = activeTab  -- wracamy do poprzedniej zakladki po zbudowaniu strony Configs
+        selectTab("Configs")
+    end)
+    selectTab("Configs")
+
+    -- pole na nazwę configa
+    cfg.nameBox = Instance.new("TextBox")
+    cfg.nameBox.Name = "ConfigName"
+    cfg.nameBox.Size = UDim2.new(0.84, 0, 0, 26)
+    cfg.nameBox.BackgroundColor3 = themes[currentTheme].ButtonBg
+    cfg.nameBox.BackgroundTransparency = 0
+    cfg.nameBox.BorderSizePixel = 0
+    cfg.nameBox.Text = ""
+    cfg.nameBox.PlaceholderText = "Nazwa configa..."
+    cfg.nameBox.PlaceholderColor3 = themes[currentTheme].TextCol
+    cfg.nameBox.TextColor3 = Color3.fromRGB(240, 240, 240)
+    cfg.nameBox.Font = Enum.Font.Gotham
+    cfg.nameBox.TextSize = 12
+    cfg.nameBox.TextXAlignment = Enum.TextXAlignment.Left
+    cfg.nameBox.ClearTextOnFocus = false
+    cfg.nameBox.LayoutOrder = 1
+    cfg.nameBox.ZIndex = 3
+    cfg.nameBox.Parent = pages["Configs"]
+    do
+        local pad = Instance.new("UIPadding")
+        pad.PaddingLeft = UDim.new(0, 8)
+        pad.Parent = cfg.nameBox
+    end
+
+    local cfgDefaultBtn = createButton("Default", 2, "Configs")
+    local cfgFarmBtn = createButton("AutoFarm", 3, "Configs")
+    local cfgSaveBtn = createButton("Save Config", 4, "Configs")
+    local cfgUnloadBtn = createButton("Unload Interface", 7, "Configs")
+
+    -- kontener na listę zapisanych configów
+    cfg.list = Instance.new("Frame")
+    cfg.list.Name = "SavedConfigs"
+    cfg.list.Size = UDim2.new(0.84, 0, 0, 0)
+    cfg.list.AutomaticSize = Enum.AutomaticSize.Y
+    cfg.list.BackgroundTransparency = 1
+    cfg.list.LayoutOrder = 5
+    cfg.list.ZIndex = 3
+    cfg.list.Parent = pages["Configs"]
+    do
+        local lay = Instance.new("UIListLayout")
+        lay.Padding = UDim.new(0, 4)
+        lay.SortOrder = Enum.SortOrder.LayoutOrder
+        lay.HorizontalAlignment = Enum.HorizontalAlignment.Center
+        lay.Parent = cfg.list
+    end
+
+    cfg.info = Instance.new("TextLabel")
+    cfg.info.Size = UDim2.new(0.84, 0, 0, 40)
+    cfg.info.BackgroundTransparency = 1
+    cfg.info.TextColor3 = themes[currentTheme].TextCol
+    cfg.info.TextSize = 11
+    cfg.info.Font = Enum.Font.Gotham
+    cfg.info.TextXAlignment = Enum.TextXAlignment.Left
+    cfg.info.TextWrapped = true
+    cfg.info.Text = "Brak zapisanych configow"
+    cfg.info.LayoutOrder = 6
+    cfg.info.ZIndex = 3
+    cfg.info.Parent = pages["Configs"]
+
+    -- presety od razu zapisują się na dysk pod swoją nazwą
+    cfgDefaultBtn.MouseButton1Click:Connect(function()
+        cfg.default()
+        local ok = cfg.saveNamed("Default")
+        cfg.info.Text = "Default wlaczony (ESP, speed 19, fullbright, auto TP gun)"
+            .. (ok and " - zapisany" or "")
+    end)
+
+    cfgFarmBtn.MouseButton1Click:Connect(function()
+        cfg.defaultAutoFarm()
+        local ok = cfg.saveNamed("AutoFarm")
+        cfg.info.Text = "AutoFarm wlaczony (autofarm 24, ESP, anti-AFK, fullbright)"
+            .. (ok and " - zapisany" or "")
+    end)
+
+    -- "Save Config" DODAJE nowy config do listy (lub nadpisuje o tej samej nazwie)
+    cfgSaveBtn.MouseButton1Click:Connect(function()
+        local name = ""
+        if cfg.nameBox then name = cfg.nameBox.Text end
+        local ok, err = cfg.saveNamed(name)
+        if ok then
+            cfg.info.Text = "Config zapisany: " .. (name ~= "" and name or ("Config " .. #cfg.configs))
+        else
+            cfg.info.Text = "Blad zapisu: " .. tostring(err)
+        end
+    end)
+
+    -- UNLOAD INTERFACE: wylacza WSZYSTKIE opcje i USUWA caly interfejs z Robloxa.
+    -- Robi to samo co teardown instancji (czyli co dzieje sie, gdy skrypt odpalimy
+    -- drugi raz), tyle ze bez odpalania nowej wersji. Kolejnosc jest wazna:
+    -- NAJPIERW podbijamy generacje, zeby petle juz nie tykaly postaci,
+    -- DOPIERO POTEM przywracamy stan swiata i kasujemy GUI.
+    cfgUnloadBtn.MouseButton1Click:Connect(function()
+        -- 1) kazda petla (farma, ESP, aimbot, TP Farm...) widzi zla generacje
+        --    i przy najblizszym ticku sama konczy prace
+        if type(getgenv) == "function" then
+            getgenv().SzpontHubGen = (getgenv().SzpontHubGen or 0) + 1
+            getgenv().SzpontHubTeardown = nil
+        end
+        -- 2) wszystkie opcje OFF (te same flagi, co w teardownie instancji)
+        pcall(function()
+            flying = false
+            noclip = false
+            speedHack = false
+            espEnabled = false
+            autoGunTP = false
+            triggerbot = false
+            altQuitEnabled = false
+            spinbotEnabled = false
+            autoKillAll = false
+            autoKillMurder = false
+            flingTargetEnabled = false
+            autoFarmCoins = false
+            flingMurderFull = false
+            roleFlags.sheriff = false
+            roleFlags.murderer = false
+            roleFlags.void = false
+            farmLegit = false
+            annoyEnabled = false
+            antiFling = false
+            antiAfk = false
+            fullbrightEnabled = false
+            hitboxExpander = false
+            aimbotEnabled = false
+            thirdPerson = false
+            mm2Ppm = false
+            if tp then tp.on = false end
+        end)
+        -- 3) stan swiata wraca: WalkSpeed 16, kolizje postaci, obrot, swiatlo, ESP
+        restoreWorldState()
+        -- 4) caly interfejs znika z Robloxa
+        pcall(function() if g then g:Destroy() end end)
+        pcall(function() if activeCheatsGui then activeCheatsGui:Destroy() end end)
+        pcall(function()
+            for _, n in ipairs({"LiptonHubHack","LiptonHubActiveCheats","LiptonHubKeySystem",
+                    "LiptonHubGameSelect","LiptonHubFisch","LiptonHubSkinChanger",
+                    "LiptonHubWatermark","LiptonHubBackdrop","BSFovCircle","BSCrosshair",
+                    "RivalsFovCircle","MM2FovCircle","SzpontHack","SzpontActiveCheats"}) do
+                local a = targetParent:FindFirstChild(n)
+                if a then a:Destroy() end
+                local b = game.CoreGui:FindFirstChild(n)
+                if b then b:Destroy() end
+            end
+        end)
+    end)
+
+    -- WCZYTANIE CONFIGU PRZY STARCIE: zawsze "Default", NIE ostatni zapisany.
+    -- WCZESNIEJ: bralismy cfg.configs[#cfg.configs] = ostatni zapis. Przycisk
+    -- presetu "AutoFarm" zapisuje sie pod wlasna nazwa, wiec jeden klik
+    -- tam = autofarm wlaczal sie przy KAZDYM starcie skryptu.
+    -- TERAZ: szukamy configu "Default". Brak = czysty start z cfg.default()
+    -- (ESP, speed 19, fullbright, auto TP gun) - bez farmy, bez TP farmy.
+    do
+        local had = cfg.loadAll()
+        local found = nil
+        if had and type(cfg.configs) == "table" then
+            for _, entry in ipairs(cfg.configs) do
+                if type(entry) == "table" and entry.name == "Default" then
+                    found = entry
+                    break
+                end
+            end
+        end
+        if found then
+            cfg.apply(found.data)
+            cfg.info.Text = "Config: Default (wczytany z dysku)"
+        else
+            -- brak "Default" na dysku: czysty start. cfg.apply i tak wygasza
+            -- autoFarmCoins, bo data.autoFarmCoins ~= true.
+            cfg.default()
+            cfg.info.Text = "Config: Default (nowy - bez autofarmu)"
+        end
+        cfg.refreshList()
+    end
+    selectTab(cfgPrevTab)
 
     local playerListFrame = Instance.new("ScrollingFrame")
     playerListFrame.Size = UDim2.new(0.9, 0, 0.75, 0)
@@ -2666,7 +3277,12 @@ function startMainScript()
     -- ANIMOWANY AKCENT (motyw Mono): hue płynie w tę, baza zostaje
     -- czarno-biała. Malowanie co 0.1 s (GUI ma ~100 elementów, co klatkę
     -- to marnowanie klatek). W innych motywach kolory są statyczne.
+    -- DRUGI TRYB FARMy: "Auto Farm Legit" = postać CHODZI do cukierka
+    -- (silnik, po drogach, bez przechodzenia przez sciany). Domyślnie OFF,
+    -- bo domyślna farma LATA (teleport CFrame) i zbiera szybciej.
+
     runService.RenderStepped:Connect(function(dt)
+        if not isCurrentGen() then return end
         if currentTheme == "Mono" then
             accentAnim.hue = (accentAnim.hue + dt * 0.07) % 1
             themes.Mono.Primary = Color3.fromHSV(accentAnim.hue, 0.12, 1)
@@ -2747,23 +3363,9 @@ function startMainScript()
                                      -- nadpisywany pozycją celu, więc nie możemy
                                      -- mnożyć własnego CFrame (jak spinbot)
 
-    runService.Heartbeat:Connect(function()
-        if not isCurrentGen() then return end
-        if flingTargetEnabled and targetPlayerName then
-            local targetPlayer = playersService:FindFirstChild(targetPlayerName)
-            -- HRP bierzemy NA BIEŻĄCO (getHRP): przy respawnie model postaci
-            -- bywa chwilowo bez HumanoidRootPart
-            local myHrp = getHRP(plr.Character)
-            local targetHrp = targetPlayer and getHRP(targetPlayer.Character)
-            if myHrp and targetHrp then
-                -- obrót wokół osi Y (pozycja zostaje ta sama, więc fling działa)
-                flingSpinAngle = (flingSpinAngle + FLING_SPIN_SPEED) % 360
-                myHrp.CFrame = targetHrp.CFrame * CFrame.Angles(0, math.rad(flingSpinAngle), 0)
-                myHrp.Velocity = Vector3.new(30000, 30000, 30000)
-                myHrp.RotVelocity = Vector3.new(20000, 20000, 20000)
-            end
-        end
-    end)
+    -- FLING ma JEDNA petle (patrz nizej, przy deklaracjach farmy): wczesniej
+    -- byly TU trzy konkurencyjne (ta, galaz Auto Farm iTP Farm), ktore
+    -- walczyly o CFrame postaci co klatke - stad efekt "drgania" i kicki.
 
     -- ANNOY: lata za wybraną osobą i huśta się przód-tył za jej plecami.
     -- Cel = targetPlayerName (ten sam, co "Target:" przycisk).
@@ -2784,6 +3386,7 @@ function startMainScript()
 
     runService.RenderStepped:Connect(function(dt)
         if not isCurrentGen() then return end
+        if not isCurrentGen() then return end
         if not annoyEnabled or not annoyTargetName then return end
         local targetPlayer = playersService:FindFirstChild(annoyTargetName)
         if not targetPlayer then return end
@@ -2796,7 +3399,7 @@ function startMainScript()
         -- gracza na 5 studów i wracamy tuż za niego (coś 1-5 studów),
         -- płynnym ruchem. Wcześniej było 0.7-1.6 studa i 2.5 studa/klatkę,
         -- co wyglądało jak fling (teleportowanie) zamiast pchania.
-        annoyPhase = annoyPhase + dt * 6.75        -- ~0.9 s na cykl odsuw-przysuw
+        annoyPhase = annoyPhase + dt * 10           -- ~0.63 s na cykl odsuw-przysuw
         local push = 3 - 2 * math.cos(annoyPhase) -- 1 - 5 studów za nim
         local goal = tHrp.Position - tHrp.CFrame.LookVector * push
         goal = Vector3.new(goal.X, goal.Y - 0.25, goal.Z) -- trochę niżej (pośladki)
@@ -2810,7 +3413,7 @@ function startMainScript()
                 -- cel uciekł o całe mapy (zmiana mapy/respawn) — jeden przeskok
                 myHrp.CFrame = CFrame.lookAt(goal, tHrp.Position)
             else
-                local step = math.min(len, 150 * dt, 1.4)
+                local step = math.min(len, 100 * dt, 1.6)
                 local newPos = myHrp.Position + offset.Unit * step
                 -- patrzymy w plecy gracza (jakbysmy go pchali)
                 myHrp.CFrame = CFrame.lookAt(newPos, tHrp.Position)
@@ -2837,6 +3440,7 @@ function startMainScript()
     farmUi.bar.MouseButton1Down:Connect(function() dragging9 = true end)
 
     uis.InputEnded:Connect(function(i)
+        if not isCurrentGen() then return end
         if i.UserInputType == Enum.UserInputType.MouseButton1 then
             dragging1, dragging2, dragging3, dragging4, dragging5 = false, false, false, false, false
             dragging6, dragging7 = false, false
@@ -2846,6 +3450,7 @@ function startMainScript()
     end)
 
     uis.InputChanged:Connect(function(i)
+        if not isCurrentGen() then return end
         if i.UserInputType == Enum.UserInputType.MouseMovement then
             if dragging1 then
                 local rel = math.clamp((i.Position.X - sb1.AbsolutePosition.X) / sb1.AbsoluteSize.X, 0, 1)
@@ -2868,12 +3473,12 @@ function startMainScript()
             elseif dragging4 then
                 local rel = math.clamp((i.Position.X - sb4.AbsolutePosition.X) / sb4.AbsoluteSize.X, 0, 1)
                 sf4.Size = UDim2.new(rel, 0, 1, 0)
-                farmSpeed = math.floor(5 + rel * 95)
+                farmSpeed = math.floor(1 + rel * 99)
                 -- suwak 5-100 = REALNA prędkość postaci (studs/s). Powyżej
                 -- ~30 serwer może odmówić ruchu ("Invalid position"), więc
                 -- ostrzegamy w etykiecie.
                 sl4.Text = "Farm Speed: " .. farmSpeed
-                    .. (farmSpeed > FARM_KICK_RISK_SPEED and " (ryzyko kicka)" or "")
+                sl4.Text = "Farm Speed: " .. farmSpeed
             elseif dragging5 then
                 local rel = math.clamp((i.Position.X - sb5.AbsolutePosition.X) / sb5.AbsoluteSize.X, 0, 1)
                 sf5.Size = UDim2.new(rel, 0, 1, 0)
@@ -2905,13 +3510,14 @@ function startMainScript()
                 -- mordercy jak najdalej (farma skręca w bok od noża).
                 local rel = math.clamp((i.Position.X - farmUi.bar.AbsolutePosition.X) / farmUi.bar.AbsoluteSize.X, 0, 1)
                 farmUi.fill.Size = UDim2.new(rel, 0, 1, 0)
-                farmAvoidDist = math.floor(1 + rel * 49)
-                farmUi.lbl.Text = "Murder Dist: " .. farmAvoidDist
+                farmPanicDist = math.floor(1 + rel * 49)
+                farmUi.lbl.Text = "Panika (morderca): " .. farmPanicDist
             end
         end
     end)
 
     uis.InputBegan:Connect(function(i, gp)
+        if not isCurrentGen() then return end
         if gp then return end
         if i.KeyCode == Enum.KeyCode.P then
             mainFrame.Visible = not mainFrame.Visible
@@ -2929,6 +3535,7 @@ function startMainScript()
     end)
 
     runService.RenderStepped:Connect(function()
+        if not isCurrentGen() then return end
         if fullbrightEnabled then
             lighting.Brightness = 2
             lighting.ClockTime = 14
@@ -2955,6 +3562,12 @@ function startMainScript()
         end
     end)
 
+    roleBtns.void.MouseButton1Click:Connect(function()
+        roleFlags.void = not roleFlags.void
+        roleBtns.void.Text = roleFlags.void and "Anti-Void: ON" or "Anti-Void: OFF"
+        roleBtns.void.BackgroundColor3 = roleFlags.void and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
+        updateActiveCheatsList()
+    end)
     b14.MouseButton1Click:Connect(function()
         antiFling = not antiFling
         b14.Text = antiFling and "Anti-Fling: ON" or "Anti-Fling: OFF"
@@ -2963,6 +3576,7 @@ function startMainScript()
     end)
 
     runService.Stepped:Connect(function()
+        if not isCurrentGen() then return end
         if antiFling and plr.Character then
             for _, player in pairs(playersService:GetPlayers()) do
                 if player ~= plr and player.Character then
@@ -3070,11 +3684,13 @@ function startMainScript()
     local draggingTP = false
     sbTP.MouseButton1Down:Connect(function() draggingTP = true end)
     uis.InputEnded:Connect(function(i)
+        if not isCurrentGen() then return end
         if i.UserInputType == Enum.UserInputType.MouseButton1 then
             draggingTP = false
         end
     end)
     uis.InputChanged:Connect(function(i)
+        if not isCurrentGen() then return end
         if draggingTP and i.UserInputType == Enum.UserInputType.MouseMovement then
             local rel = math.clamp((i.Position.X - sbTP.AbsolutePosition.X) / sbTP.AbsoluteSize.X, 0, 1)
             sfTP.Size = UDim2.new(rel, 0, 1, 0)
@@ -3243,13 +3859,12 @@ function startMainScript()
                 end
             end
         end
-        -- zapas gdy lobby chwilowo nie ma (przeładowanie): pozycje spawnów,
-        -- zbierane przy tym samym odświeżaniu, nie przy każdym wywołaniu
-        if #found == 0 then
-            lobbySpawns = {}
-            for _, obj in pairs(workspace:GetDescendants()) do
-                if obj:IsA("SpawnLocation") then table.insert(lobbySpawns, obj.Position) end
-            end
+        -- spawny lobby zbieramy ZAWSZE (nie tylko gdy brak modeli): potrzebne
+        -- do teleportu po flingu ze smiercia oraz do zakladki Teleport.
+        -- GetDescendants odpala sie max raz na 2 s (cache wyzej), nie co klatke.
+        lobbySpawns = {}
+        for _, obj in pairs(workspace:GetDescendants()) do
+            if obj:IsA("SpawnLocation") then table.insert(lobbySpawns, obj.Position) end
         end
         lobbyBoxes, lobbyBoxesAt = found, tick()
         return found
@@ -3305,6 +3920,7 @@ function startMainScript()
     end)
 
     runService.Heartbeat:Connect(function()
+        if not isCurrentGen() then return end
         if hitboxExpander then
             for _, p in pairs(playersService:GetPlayers()) do
                 if p ~= plr and p.Character then
@@ -3346,6 +3962,7 @@ function startMainScript()
     local coinScanClock = 999
     local coinBlacklist = {}   -- Part monety -> os.clock() końca blokady
     local farmStuckCoin = nil  -- moneta, przy której stoimy bez efektu
+    local farmStuckDist = nil  -- jej dystans z ostatniego POSTEPU (pomiar, nie zegar)
     -- koordynacja ruchu (Auto Farm / TP Farm / Auto Kill All / Auto TP Gun):
     -- wszystkie sterują CFrame postaci, więc gdy któreś właśnie teleportuje,
     -- pozostałe robią przerwę — inaczej pętle walczą o pozycję co klatkę
@@ -3356,15 +3973,367 @@ function startMainScript()
     -- naraz i żadna nie wyłącza drugiej.
     local farmIdle = false
     local farmStuckClock = 0
-    local farmFullScanTick = 0
+    local farmMurderClose = false  -- morderca z nożem jest przy nas (pauza farmy)
+    local farmMurderAt = 0         -- kiedy ostatnio sprawdzaliśmy mordercę
+    -- STAN WORKA CUKIERKOW: pelny = dalsze latanie po cukierkach nie ma
+    -- sensu (serwer podniesienia i tak nie zaliczy). Wtedy flingujemy
+    -- morderce. Zegar, nie co klatke - to GUI, a nie model.
+    local farmBag = { full = false, clock = 0 }
+    -- STAN FLINGU/ANTI-VOID (jedna tablica: Lua ma limit 200 rejestr�w
+    -- na funkcje, a osobny local na kazdy parametr wywalal kompilacje).
+    --  * safe   = pozycja, z ktorej zaczynalismy fling (tam wracamy)
+    --  * active = trwa fling -> farmy nie maja prawa ruszac postacia
+    --  * spawn  = zginelismy podczas flingu -> po respawnie na spawn lobby
+    --  * last   = ostatnia pozycja "na ziemi" (punkt ratunkowy anti-void)
+    local flingBack = { safe = nil, active = false, spawn = false }
+    local voidState = { last = nil, at = 0 }
+
+    -- ============================================================
+    -- JEDNA PETLA FLINGU (zamiast trzech: reczny Fling Target, galaz
+    -- Auto Farm i ta petla - wszystkie walczyly o CFrame postaci).
+    --
+    -- KOLEJNOSC CELU (pierwszy trafiony wygrywa):
+    --   1) Fling Target  - recznie wybrana osoba z listy graczy
+    --   2) Fling Murderer - ktokolwiek z nozem
+    --   3) Fling Sheriff  - ktokolwiek z rewolwerem
+    --   4) Auto Farm      - worek cukierkow pelny -> morderca
+    --
+    -- TELEPORT POWROTNY: fling wyrzuca NAS tak samo jak cel, wiec bez
+    -- tego po kazdym flingu konczylismy w losowym miejscu mapy albo
+    -- pod nia (smierc). Teraz: ZYWY wraca na mape (pozycja startu
+    -- flingu), MARTWY po respawnie dostaje spawn lobby.
+    --
+    -- ANTI-VOID: pilnujemy Y postaci. Ostatnia pozycja NA ZIEMI jest
+    -- punktem ratunkowym - spadek ponizej niej o duzo = cofamy postac.
+    -- ============================================================
+    runService.Heartbeat:Connect(function(dt)
+        if not isCurrentGen() then return end
+        local ch = plr.Character
+        local hrp = getHRP(ch)
+        local hum = getHum(ch)
+        if not (hrp and hum) then return end
+
+        -- 1) ANTI-VOID: zapisuj pozycje, gdy postac STOI na ziemi
+        --    (FloorMaterial ~= Air) i nie jest w lobby. To nasz punkt
+        --    ratunkowy - tani test, zero GetDescendants.
+        if roleFlags.void and hum.Health > 0 and hum.FloorMaterial ~= Enum.Material.Air
+            and not isInLobby(hrp.Position, 25) then
+            voidState.last = hrp.Position
+        end
+        -- spadanie: Y duzo nizej niz ostatnia pozycja na ziemi, albo
+        -- twardy prog ponizej wszystkiego co MM2 buduje (mapa od -201)
+        if roleFlags.void and hum.Health > 0 then
+            local bez = voidState.last
+            if (bez and hrp.Position.Y < bez.Y - 120) or hrp.Position.Y < -250 then
+                local ratuj = bez
+                if not ratuj then
+                    -- brak zapisanej pozycji: spawn lobby jako ostatecznosc
+                    local boxes = getLobbyBoxes()
+                    if #boxes > 0 then
+                        ratuj = boxes[1].cf.Position + Vector3.new(0, 6, 0)
+                    end
+                end
+                if ratuj then
+                    hrp.CFrame = CFrame.new(ratuj)
+                    hrp.Velocity = Vector3.new(0, 0, 0)
+                    hrp.RotVelocity = Vector3.new(0, 0, 0)
+                    if hum then
+                        hum.PlatformStand = false
+                        hum.AutoRotate = true
+                    end
+                end
+            end
+        end
+
+        -- 2) KTO Jest CELEM (kolejnosc ma znaczenie)
+        local celHrp, autoFarma = nil, false
+        if flingTargetEnabled and targetPlayerName then
+            local p = playersService:FindFirstChild(targetPlayerName)
+            celHrp = p and getHRP(p.Character)
+        end
+        if not celHrp and (roleFlags.murderer or roleFlags.sheriff) then
+            local rola = roleFlags.murderer and "Murderer" or "Sheriff"
+            for _, p in ipairs(playersService:GetPlayers()) do
+                if p ~= plr and p.Character and getRole(p) == rola then
+                    local ph = getHRP(p.Character)
+                    local pu = getHum(p.Character)
+                    if ph and pu and pu.Health > 0 then
+                        celHrp = ph
+                        break
+                    end
+                end
+            end
+        end
+        if not celHrp and flingMurderFull and autoFarmCoins and farmBag.full
+            and getRole(plr) ~= "Murderer" then
+            for _, p in ipairs(playersService:GetPlayers()) do
+                if p ~= plr and p.Character and getRole(p) == "Murderer" then
+                    local ph = getHRP(p.Character)
+                    local pu = getHum(p.Character)
+                    if ph and pu and pu.Health > 0 then
+                        celHrp = ph
+                        autoFarma = true
+                        break
+                    end
+                end
+            end
+        end
+
+        -- 3) FLING albo POWROT
+        if celHrp then
+            if not flingBack.active then
+                flingBack.active = true
+                flingBack.safe = hrp.Position   -- pamietamy skad zaczynamy
+                if hum then
+                    hum.PlatformStand = true    -- jak Fly: zawieszenie fizyki
+                    hum.AutoRotate = false
+                end
+            end
+            flingSpinAngle = (flingSpinAngle + FLING_SPIN_SPEED) % 360
+            hrp.CFrame = celHrp.CFrame * CFrame.Angles(0, math.rad(flingSpinAngle), 0)
+            -- Velocity = 30000: serwer widzi ogromna predkosc i cel zaczyna
+            -- leciec. To JEDYNE miejsce w calym skrypcie z takim skokiem,
+            -- wiec kick za "Invalid position" moze dotyczyc tylko flingu.
+            hrp.Velocity = Vector3.new(30000, 30000, 30000)
+            hrp.RotVelocity = Vector3.new(20000, 20000, 20000)
+            if autoFarma then
+                b13.Text = "Auto Farm Coins: ON (worek pelny - fling)"
+            end
+        elseif flingBack.active then
+            -- cel zniknal (zbity/zmienil role/wyszedl) -> konczymy fling
+            flingBack.active = false
+            if hum and hum.Health > 0 and flingBack.safe then
+                -- ZYWY: wracamy na mape, tam skad zaczynalismy fling
+                hrp.CFrame = CFrame.new(flingBack.safe)
+                hrp.Velocity = Vector3.new(0, 0, 0)
+                hrp.RotVelocity = Vector3.new(0, 0, 0)
+                hum.PlatformStand = false
+                hum.AutoRotate = true
+            elseif hum and hum.Health <= 0 then
+                -- MARTWY: po respawnie trafiamy na spawn lobby
+                flingBack.spawn = true
+            end
+            flingBack.safe = nil
+        end
+
+        -- 4) POWROT NA SPAWN PO SMERCI PODCZAS FLINGU
+        if flingBack.spawn and hum and hum.Health > 0 then
+            flingBack.spawn = false
+            local boxes = getLobbyBoxes()
+            local dokad = nil
+            if #boxes > 0 then
+                dokad = boxes[1].cf.Position + Vector3.new(0, 6, 0)
+            elseif lobbySpawns and lobbySpawns[1] then
+                dokad = lobbySpawns[1] + Vector3.new(0, 6, 0)
+            end
+            if dokad then
+                hrp.CFrame = CFrame.new(dokad)
+                hrp.Velocity = Vector3.new(0, 0, 0)
+                hrp.RotVelocity = Vector3.new(0, 0, 0)
+            end
+        end
+    end)
+
+    -- ============================================================
+    -- ZAKLADKA TELEPORT: szybkie przeskoki bez latania po mapie.
+    -- Kazdy przycisk szuka celu NA BIEZACO (role zmieniaja sie co
+    -- runde, wiec nie da sie zapamietac nazwy gracza).
+    -- SAFE PLACE robi platforme 20x20 CLIENT SIDE - serwer jej nie
+    -- zna, wiec nikt poza nami na nie nie stanie, a my mamy na czym
+    -- stac nawet gdy odpadlismy z mapy.
+    -- ============================================================
+    makePage("Teleport")
+    -- Zakladka Teleport w OSCIENNEJ funkcji - patrz wyjasnienie na koncu bloku.
+    local function setupTeleportTab()
+    local tbTele = Instance.new("TextButton")
+    tbTele.Name = "TeleportTab"
+    tbTele.Size = UDim2.new(0, 134, 0, 36)
+    tbTele.BackgroundColor3 = themes[currentTheme].ButtonBg
+    tbTele.BackgroundTransparency = 0
+    tbTele.BorderSizePixel = 0
+    tbTele.Text = "Teleport"
+    tbTele.TextColor3 = Color3.fromRGB(235, 235, 235)
+    tbTele.TextSize = 14
+    tbTele.Font = Enum.Font.GothamSemibold
+    tbTele.LayoutOrder = 7
+    tbTele.ZIndex = 3
+    tbTele.Parent = sidebar
+    tabButtons["Teleport"] = tbTele
+    tbTele.MouseButton1Click:Connect(function()
+        selectTab("Teleport")
+    end)
+
+    local bTpSheriff = createButton("Teleport: Sheriff", 1, "Teleport")
+    local bTpMurderer = createButton("Teleport: Murderer", 2, "Teleport")
+    local bTpMap = createButton("Teleport: Map", 3, "Teleport")
+    local bTpSpawn = createButton("Teleport: Spawn", 4, "Teleport")
+    local bTpSafe = createButton("Teleport: Safe Place", 5, "Teleport")
+
+    -- STATUS przy kazdym teleport: przycisk mowi, co sie stalo (bez tego
+    -- przy braku szeryfa/na lobby klik wygladal jak zepsuty).
+    local tpStatus = Instance.new("TextLabel")
+    tpStatus.Size = UDim2.new(0.95, 0, 0, 26)
+    tpStatus.BackgroundTransparency = 1
+    tpStatus.TextColor3 = themes[currentTheme].TextCol
+    tpStatus.TextSize = 11
+    tpStatus.Font = Enum.Font.SourceSansBold
+    tpStatus.Text = ""
+    tpStatus.LayoutOrder = 6
+    tpStatus.ZIndex = 3
+    tpStatus.Parent = pages["Teleport"]
+    table.insert(allLabels, tpStatus)
+    local function tpSay(t)
+        tpStatus.Text = t
+        task.delay(4, function()
+            if tpStatus.Text == t then tpStatus.Text = "" end
+        end)
+    end
+
+    -- platforma Safe Place: jedna instancja, tworzona raz i przenoszona
+    -- (kazde klik = nowy part = smieci w workspace do konca sesji)
+    local safePlat = nil
+    local function getSafePlat()
+        if safePlat and safePlat.Parent then return safePlat end
+        safePlat = Instance.new("Part")
+        safePlat.Name = "SzpontSafePlace"
+        safePlat.Anchored = true
+        safePlat.CanCollide = true
+        safePlat.Size = Vector3.new(20, 1, 20)
+        safePlat.Color = Color3.fromRGB(0, 200, 120)
+        safePlat.Material = Enum.Material.Neon
+        safePlat.Transparency = 0.35
+        -- NIE trafia do targetParent ani do collection: ma byc normalnym
+        -- elemntem workspace (klient widzi, serwer nie) - inaczej nie
+        -- mialaby kolizji i przeszkadzalaby ESP/farmie.
+        return safePlat
+    end
+
+    -- centrum MAPY rundy: najwiekszy model w workspace, ktory NIE jest
+    -- lobby ani postacia gracza. Odswiezane co 5 s (bounding box
+    -- GetBoundingBox jest tani, ale nie chcemy go liczyc co klik).
+    local mapCenter, mapCenterAt = nil, 0
+    local function getMapCenter()
+        if mapCenter and tick() - mapCenterAt < 5 then return mapCenter end
+        local best, bestVol = nil, 0
+        for _, obj in ipairs(workspace:GetChildren()) do
+            if obj:IsA("Model") and obj ~= workspace.CurrentCamera then
+                local n = obj.Name:lower()
+                if not n:find("lobby") and not n:find("camera")
+                    and not playersService:GetPlayerFromCharacter(obj) then
+                    local ok, cf, size = pcall(function() return obj:GetBoundingBox() end)
+                    if ok and cf and size then
+                        local vol = size.X * size.Y * size.Z
+                        if vol > bestVol then
+                            bestVol = vol
+                            best = cf.Position
+                        end
+                    end
+                end
+            end
+        end
+        mapCenter, mapCenterAt = best, tick()
+        return best
+    end
+
+    local function tpDo(pos, co)
+        local ch = plr.Character
+        local hrp = getHRP(ch)
+        local hum = getHum(ch)
+        if not (hrp and hum) or hum.Health <= 0 then
+            tpSay("Nie zyjesz - nie mozna sie teleportowac")
+            return
+        end
+        -- najpierw przywroc fizyke: po flingu/farmie postac moze miec
+        -- PlatformStand i zerowy AutoRotate - wtedy teleport "dziala",
+        -- ale postac lezy i nie da sie ruszyc.
+        hum.PlatformStand = false
+        hum.AutoRotate = true
+        hrp.Velocity = Vector3.new(0, 0, 0)
+        hrp.RotVelocity = Vector3.new(0, 0, 0)
+        hrp.CFrame = CFrame.new(pos)
+        tpSay(co)
+    end
+
+    local function tpDoRoli(rola, nazwa)
+        for _, p in ipairs(playersService:GetPlayers()) do
+            if p ~= plr and p.Character and getRole(p) == rola then
+                local ph = getHRP(p.Character)
+                local pu = getHum(p.Character)
+                if ph and pu and pu.Health > 0 then
+                    -- kolo osoby, nie NA niej: stanie na HRP = wyrzucanie
+                    -- obu postaci (to wlasnie robi fling).
+                    tpDo(ph.Position + Vector3.new(3, 2, 3), "Teleport do: " .. nazwa)
+                    return
+                end
+            end
+        end
+        tpSay(nazwa .. " nie zyje / nie ma go na mapie")
+    end
+
+    bTpSheriff.MouseButton1Click:Connect(function()
+        tpDoRoli("Sheriff", "Sheriff")
+    end)
+    bTpMurderer.MouseButton1Click:Connect(function()
+        tpDoRoli("Murderer", "Murderer")
+    end)
+
+    bTpMap.MouseButton1Click:Connect(function()
+        local c = getMapCenter()
+        if not c then
+            tpSay("Nie widze mapy rundy (lobby?)")
+            return
+        end
+        -- kolo srodka, nie W srodku: srodek mapy bywa w geometrii
+        tpDo(c + Vector3.new(0, 8, 0), "Teleport na mape")
+    end)
+
+    bTpSpawn.MouseButton1Click:Connect(function()
+        if lobbySpawns and lobbySpawns[1] then
+            tpDo(lobbySpawns[1] + Vector3.new(0, 3, 0), "Teleport na spawn")
+            return
+        end
+        local boxes = getLobbyBoxes()
+        if #boxes > 0 then
+            tpDo(boxes[1].cf.Position + Vector3.new(0, 6, 0), "Teleport na spawn")
+            return
+        end
+        tpSay("Nie widze spawnu lobby")
+    end)
+
+    -- SAFE PLACE: platforma 20x20 pod postacia + teleport na jej srodek.
+    -- Y platformy bierzemy z ostatniej pozycji "na ziemi" (anti-void ja
+    -- zapisuje) - dzieki temu dziala tez wtedy, gdy juz spadamy pod mape.
+    bTpSafe.MouseButton1Click:Connect(function()
+        local ch = plr.Character
+        local hrp = getHRP(ch)
+        if not hrp then return end
+        local y = hrp.Position.Y
+        if voidState.last and y < voidState.last.Y - 30 then
+            -- spadamy: kladziemy platforme WYZEJ, zeby zdazyla zlapac
+            y = voidState.last.Y
+        end
+        local plat = getSafePlat()
+        plat.Parent = workspace
+        plat.Position = Vector3.new(hrp.Position.X, y - 4, hrp.Position.Z)
+        tpDo(plat.Position + Vector3.new(0, 3, 0), "Safe Place: platforma 20x20")
+    end)
+    end
+    -- Wywolane od razu, ale W OSCIENNEJ funkcji: Luau ma twardy limit 200
+    -- rejestr�w NA FUNKCJE. Trzymanie tych ~15 locali bezposrednio w
+    -- startMainScript wypelnialo konto do konca i kompilacja wywalala sie
+    -- juz przy deklaracjach farmy (farmJumpAt). Wlasna funkcja = wlasny limit.
+    setupTeleportTab()
+    local farmSideAt = 0            -- kiedy ostatnio zmienilismy strone obchodzenia
+    local farmJumpAt = 0            -- cooldown skoku (obie farmy) - bez tego skakalismy co klatke
+    local farmRayParams = RaycastParams.new()  -- parametry raycastu (przeszkody na drodze)
+    farmRayParams.FilterType = Enum.RaycastFilterType.Exclude
+    local wallPass = {}    -- sciana -> czas wygasniecia "przepuszczenia" (0.6 s)
     -- zegar "dobiegania do celu" podczas ucieczki: trzymamy go, żeby farma
     -- nie goniła w kółko za jednym nieosiągalnym pickupem (morderca by nas
     -- dogonił). Gdy cel zniknie / przerwa, zegar się zeruje.
-    local farmEscapeGrabClock = 0
     -- aktualnie goniowany pickup w trybie ucieczki: gdy cel sie zmieni
     -- (nowa moneta), zegar startuje od nowa — inaczej po 1,2 s przestalibyśmy
     -- łapać w ogóle, nawet gdy zbieranie działa
-    local farmEscapeGrabTarget = nil
 
     local function isCoinAlive(part)
         if not part or not part.Parent then return false end
@@ -3472,14 +4441,29 @@ function startMainScript()
         -- gdy TP Farm akurat idzie do monety (tp.walking).
         updateActiveCheatsList()
         if autoFarmCoins then
-            coinScanClock = 999 -- wymuś odświeżenie listy monet od razu
+            coinScanClock = 0 -- skan listy monet od razu
             farmStuckCoin, farmStuckClock = nil, 0
         elseif plr.Character then
             local hum = plr.Character:FindFirstChildOfClass("Humanoid")
-            if hum then hum.AutoRotate = true end
+            -- przywrocenie DOMYSLNEGO chodu: farma ustawia WalkSpeed do 
+            -- 100, wiec bez tego postac zostawalaby sprintujaca po 
+            -- wylaczeniu farmy (suwak farmSpeed).
+            if hum then
+                hum.AutoRotate = true
+                hum.WalkSpeed = 16
+                hum.PlatformStand = false -- tryb LOT (Fly) ustawia true - bez tego
+                -- postac zostalaby w pozycji "lezacej" po wylaczeniu farmy
+            end
             -- zdejmujemy noclip farmy (po respawnie nowa postać i tak ma kolizję)
             for _, p in ipairs(plr.Character:GetChildren()) do
                 if p:IsA("BasePart") then p.CanCollide = true end
+            end
+            -- oddajemy kolizje scianom przepuszczanym podczas lotu
+            for part in pairs(wallPass) do
+                wallPass[part] = nil
+                if part.Parent and not part.CanCollide then
+                    part.CanCollide = true
+                end
             end
         end
     end)
@@ -3496,7 +4480,15 @@ function startMainScript()
             tp.scanAt = 0        -- i od razu odśwież listę monet
         elseif plr.Character then
             local hum = plr.Character:FindFirstChildOfClass("Humanoid")
-            if hum then hum.AutoRotate = true end
+            -- przywrocenie DOMYSLNEGO chodu: farma ustawia WalkSpeed do 
+            -- 100, wiec bez tego postac zostawalaby sprintujaca po 
+            -- wylaczeniu farmy (suwak farmSpeed).
+            if hum then
+                hum.AutoRotate = true
+                hum.WalkSpeed = 16
+                hum.PlatformStand = false -- tryb LOT (Fly) ustawia true - bez tego
+                -- postac zostalaby w pozycji "lezacej" po wylaczeniu farmy
+            end
             -- zdejmujemy noclip farmy (po respawnie nowa postać i tak ma kolizję)
             for _, p in ipairs(plr.Character:GetChildren()) do
                 if p:IsA("BasePart") then p.CanCollide = true end
@@ -3509,6 +4501,7 @@ function startMainScript()
     -- lokalnych na chunk, a osobny local na helper wywalał kompilację pliku.
     task.spawn(function()
         while true do
+            if not isCurrentGen() then return end
             if not isCurrentGen() then return end
             local ok, err = pcall(function()
                 task.wait(0.02)
@@ -3598,18 +4591,43 @@ function startMainScript()
                                     hum.AutoRotate = staryRot
                                 end
 
-                                -- Touched odpala się przy STARCIE kolizji, więc samo
-                                -- stanie przy monecie nic nie zalicza: odskakujemy
-                                -- i wracamy (kilkanaście studów = bezpieczne)
+                                -- Touched odpala sie przy STARCIE kolizji, wiec samo
+                                -- stanie przy moniecie czasem nie zalicza. WCZESNIEJ: teleport
+                                -- CFrame o 2.4 studa i z powrotem = nagly skok pozycji = 
+                                -- "Invalid position" (Error 267) i kopanie z serwera.
+                                -- TERAZ: oba ruchy robimy SILNIKIEM (Humanoid:Move). Silnik
+                                -- zmienia pozycje stopniowo, wiec walidacja pradkosci serwera
+                                -- przechodzi - a Touched i tak odpala, bo postac realnie sie
+                                -- przemieszcza obok monety.
                                 if hrp and hrp.Parent then
                                     local pos = hrp.Position
-                                    hrp.CFrame = CFrame.new(pos + Vector3.new(2.4, 0.3, 0))
-                                    task.wait(0.08)
-                                    hrp = getHRP(plr.Character) -- świeży HRP po respawnie
-                                    if hrp and hrp.Parent then
-                                        hrp.CFrame = CFrame.new(pos)
+                                    local kierunek = (target - pos)
+                                    kierunek = Vector3.new(kierunek.X, 0, kierunek.Z)
+                                    if kierunek.Magnitude > 0.1 then
+                                        kierunek = kierunek.Unit
+                                    else
+                                        kierunek = Vector3.new(1, 0, 0)
                                     end
-                                    task.wait(0.08)
+                                    local starySpeedHop = hum.WalkSpeed
+                                    local staryRotHop = hum.AutoRotate
+                                    hum.WalkSpeed = 18
+                                    hum.AutoRotate = false
+                                    -- faza 1: odbicie w bok (skok + chodzenie, silnik robi fizyke)
+                                    hrp.CFrame = CFrame.lookAt(pos, pos - kierunek)
+                                    hum:Move(-kierunek, false)
+                                    task.wait(0.12)
+                                    hrp = getHRP(plr.Character)
+                                    hum = getHum(plr.Character)
+                                    -- faza 2: powrot na monete
+                                    if hrp and hrp.Parent and hum then
+                                        hrp.CFrame = CFrame.lookAt(hrp.Position, hrp.Position + kierunek)
+                                        hum:Move(kierunek, false)
+                                        task.wait(0.12)
+                                    end
+                                    if hum and hum.Parent then
+                                        hum.WalkSpeed = starySpeedHop
+                                        hum.AutoRotate = staryRotHop
+                                    end
                                 end
 
                                 tp.nextAt = os.clock() + math.max(tp.sec, tp.minGap)
@@ -3633,319 +4651,252 @@ function startMainScript()
         end
     end)
 
-    task.spawn(function()
-        while true do
-            if not isCurrentGen() then return end
-            local ok, err = pcall(function()
-                local rawDt = task.wait(0.02)
-                -- ANTI-KICK: dt przycięte — po lag spike'u postać NIE robi dużego
-                -- skoku (stary kod: speed * 0.5 s = 12-15 studów w jedną klatkę,
-                -- serwer MM2 kopał za "Invalid position")
-                local dt = math.min(rawDt, FARM_DT_CLAMP)
-
-                -- wygasanie blokad na monety
-                local now = os.clock()
-                for coin, untilT in pairs(coinBlacklist) do
-                    if now >= untilT or not coin.Parent then
-                        coinBlacklist[coin] = nil
-                    end
-                end
-
-                -- HRP na bieżąco: po respawnie nowy model nie ma jeszcze
-                -- HumanoidRootPart, a .HumanoidRootPart by rzucił wyjątek
-                local hrp = getHRP(plr.Character)
-                if autoFarmCoins and hrp then
-                    local hum = getHum(plr.Character)
-
-                    -- NOCLIP NA CZAS FARMY: pozycją sterujemy co klatkę CFrame'em,
-                    -- a kolizja tylko blokowała postać w ścianach (stanie w miejscu).
-                    -- Humanoid potrafi sam odblokować kolizję części, więc ustawiamy
-                    -- co tick. Włączający i wyłączający farmę przywracają kolizję.
-                    for _, p in ipairs(plr.Character:GetChildren()) do
-                        if p:IsA("BasePart") then p.CanCollide = false end
-                    end
-
-                    coinScanClock = coinScanClock + dt
-                    local empty = #coinCache == 0
-                    if coinScanClock >= (empty and FARM_EMPTY_SCAN_INTERVAL or FARM_SCAN_INTERVAL) then
-                        coinScanClock = 0
-                        -- pełny skan workspace tylko co 4 odświeżenie, gdy lista pusta
-                        farmFullScanTick = farmFullScanTick + 1
-                        refreshCoinCache(empty and farmFullScanTick % 4 == 0)
-                    end
-
-                    -- MORDERCA: wykrywamy go ZAWSZE (potrzebujemy kierunku
-                    -- ucieczki także wtedy, gdy zbieramy cukierki), ale sama
-                    -- ucieczka w czystą stronę włącza się dopiero, gdy nóż
-                    -- jest naprawdę blisko (FARM_PANIC_DIST).
-                    local murHrp = nil
-                    for _, p in ipairs(game:GetService("Players"):GetPlayers()) do
-                        if p ~= plr and p.Character and getRole(p) == "Murderer" then
-                            local m = p.Character:FindFirstChild("HumanoidRootPart")
-                            local mh = p.Character:FindFirstChildOfClass("Humanoid")
-                            -- gracz stojący w LOBBY to nie morderca na mapie —
-                            -- nie uciekamy od nikogo poza mapą. Sprawdzamy to
-                            -- tylko jak morderca jest blisko (isInLobby potrafi
-                            -- być drogie, więc nie wołamy go co klatkę).
-                            if m and mh and mh.Health > 0 then
-                                local dMur = (hrp.Position - m.Position).Magnitude
-                                if dMur < farmAvoidDist + 15 and not isInLobby(m.Position, 25) then
-                                    murHrp = m
-                                    break
-                                end
-                            end
-                        end
-                    end
-                    -- kierunek ucieczki: prosto OD mordercy, tylko poziomo
-                    -- (schodzimy w bok, nie w podłogę/sufit)
-                    local awayFromMur, murDist = nil, math.huge
-                    if murHrp then
-                        local a = hrp.Position - murHrp.Position
-                        a = Vector3.new(a.X, 0, a.Z)
-                        murDist = a.Magnitude
-                        if murDist < 0.5 then
-                            a = hrp.CFrame.LookVector  -- stoimy na nim: uciekamy przed siebie
-                            murDist = 0.5
-                        end
-                        awayFromMur = a
-                    end
-                    -- WAGA UCIECZKI: 0 = morderca daleko (zbieramy normalnie),
-                    -- 1 = nóż tuż przy nas (ucieczka ma pierwszeństwo).
-                    -- Między tymi wartościami farma zbiera, ale skręca w bok
-                    -- od noża — dzięki temu nie gubi wszystkich cukierków.
-                    local fleeWeight = 0
-                    if awayFromMur then
-                        -- próg paniki to min(FARM_PANIC_DIST, suwak): suwak
-                        -- "Murder Dist" na 1 = ucieczka tylko jak nóż jest
-                        -- na NAS (farma zbiera praktycznie zawsze)
-                        local panicDist = math.min(FARM_PANIC_DIST, farmAvoidDist)
-                        if murDist >= farmAvoidDist then
-                            fleeWeight = 0
-                        elseif murDist <= panicDist then
-                            fleeWeight = 1
-                        elseif farmAvoidDist > panicDist then
-                            fleeWeight = (farmAvoidDist - murDist) / (farmAvoidDist - panicDist)
-                        else
-                            fleeWeight = 1
-                        end
-                    end
-                    local panic = fleeWeight >= 1
-
-                    local nearestCoin, shortestDistance = nil, math.huge
-                    for i = #coinCache, 1, -1 do
-                        local coin = coinCache[i]
-                        if not isCoinAlive(coin) then
-                            table.remove(coinCache, i)
-                        elseif not coinBlacklist[coin] then
-                            local dist = (hrp.Position - coin.Position).Magnitude
-                            -- pomijamy monety spoza zasięgu (np. na innej mapie)
-                            if dist <= FARM_TARGET_RANGE and dist < shortestDistance then
-                                shortestDistance = dist
-                                nearestCoin = coin
-                            end
-                        end
-                    end
-
-                    -- stan "nie mam co zbierać" → TP Farm może w tym czasie
-                    -- teleportować do monety (obie farmy mogą być ON naraz)
-                    farmIdle = (nearestCoin == nil)
-
-                    if killBusy or gunDropRef or tp.walking or annoyEnabled then
-                        -- KOORDYNACJA: Auto Kill All (killBusy), Auto TP Gun
-                        -- (broń leży na ziemi, gunDropRef) albo TP Farm właśnie
-                        -- idzie do monety — ktoś steruje CFrame postaci, więc
-                        -- farma stoi w miejscu i nie walczy o pozycję.
-                        if hum then hum.AutoRotate = true end
-                        farmStuckCoin, farmStuckClock = nil, 0
-                        farmIdle = false
-                    elseif panic and (not hum or hum.Health > 0) then
-                        -- MORDERCA PRZY NAS (panika): ucieczka — ale NIE przestajemy
-                        -- zbierać. Stary kod uciekał w czystą stronę i czekał, aż
-                        -- morderca odejdzie: przez to gracz tracił cukierki/monety
-                        -- leżące po drodze, a morderca i tak dogonił (chód ~16 vs
-                        -- farma 24, więc dystans i tak się odbudowywał). Teraz w
-                        -- trakcie ucieczki farma łapie pickupy, o ile nie prowadzą
-                        -- prosto na nóż:
-                        --  * cel leży "od mordercy" (cos >= FARM_ESCAPE_SAFE_DOT), albo
-                        --  * cel jest bardzo blisko (<= FARM_ESCAPE_GRAB_NEAR)
-                        -- Kierunek ruchu to mieszanka ucieczki + celu, więc wypadkowy
-                        -- wektor dalej "ucieka" (dot >= bezpieczny próg), a my
-                        -- jednocześnie docieramy do pickupa.
-                        if hum then
-                            hum.PlatformStand = false
-                            hum.AutoRotate = false
-                        end
-                        hrp.Velocity = Vector3.new(0, 0, 0)
-                        hrp.RotVelocity = Vector3.new(0, 0, 0)
-
-                        local escDir = awayFromMur.Unit
-                        local moveDir = escDir
-                        local grabTarget = nil
-
-                        -- Wybór celu: NIE bierzemy po prostu najbliższej monety, bo
-                        -- może leżeć za nami (czyli w stronę mordercy). Szukamy
-                        -- najbliższej monety, do której pójście NIE zmniejsza
-                        -- odległości od noża (dot >= próg), albo bardzo bliskiej
-                        -- (tę łapiemy mimo wszystko — 3 study to ułamek sekundy).
-                        if #coinCache > 0 then
-                            local bestDist = math.huge
-                            for i = #coinCache, 1, -1 do
-                                local c = coinCache[i]
-                                if not isCoinAlive(c) then
-                                    table.remove(coinCache, i)
-                                elseif not coinBlacklist[c] then
-                                    local cDelta = c.Position - hrp.Position
-                                    local flat = Vector3.new(cDelta.X, 0, cDelta.Z)
-                                    local flatLen = flat.Magnitude
-                                    if flatLen <= FARM_ESCAPE_GRAB_RANGE and flatLen < bestDist then
-                                        local safe = false
-                                        if flatLen > 0.05 then
-                                            safe = (escDir:Dot(flat.Unit)) >= FARM_ESCAPE_SAFE_DOT
-                                        end
-                                        if safe or flatLen <= FARM_ESCAPE_GRAB_NEAR then
-                                            bestDist = flatLen
-                                            grabTarget = c
-                                        end
-                                    end
-                                end
-                            end
-                        end
-
-                        if grabTarget then
-                            -- NOWY cel → zegar od nowa (inna moneta = świeży start).
-                            -- Dzięki temu po udanym zebraniu farma wraca do łapania,
-                            -- zamiast po 1,2 s przestać łapać w ogóle.
-                            if grabTarget ~= farmEscapeGrabTarget then
-                                farmEscapeGrabTarget = grabTarget
-                                farmEscapeGrabClock = 0
-                            end
-                            -- zegar dobiegania: nie goniemy w kółko za jednym celem,
-                            -- bo morderca by nas dogonił. Po FARM_ESCAPE_GRAB_TIME
-                            -- przerywamy łapanie (zegar przestaje rosnąć, ale się nie
-                            -- zeruje — wrócimy do łapania, gdy cel zniknie/zmieni się).
-                            if farmEscapeGrabClock < FARM_ESCAPE_GRAB_TIME then
-                                farmEscapeGrabClock = farmEscapeGrabClock + dt
-                                local cDelta = grabTarget.Position - hrp.Position
-                                local flat = Vector3.new(cDelta.X, 0, cDelta.Z)
-                                if flat.Magnitude > 0.05 then
-                                    -- mieszanka: ucieczka ma pierwszeństwo, cel tylko
-                                    -- dokłada trochę — wypadkowy kierunek wciąż ucieka
-                                    moveDir = (escDir + flat.Unit * 0.6).Unit
-                                end
-                            else
-                                grabTarget = nil
-                            end
-                        else
-                            -- brak bezpiecznego celu → sama ucieczka, zegar od nowa
-                            farmEscapeGrabClock = 0
-                            farmEscapeGrabTarget = nil
-                        end
-
-                        if grabTarget then
-                            -- cel: środek pickupa; blisko niego kręcimy się w kółko,
-                            -- bo Touched odpala się na POCZĄTKU kolizji (samo stanie
-                            -- w monecie nie gwarantuje zbioru) — tak samo jak w farmie
-                            local goal = grabTarget.Position
-                            if (hrp.Position - goal).Magnitude < 1.5 then
-                                local a = now * 8
-                                goal = goal + Vector3.new(math.cos(a), 0, math.sin(a)) * 1.4
-                            end
-                            local offset = goal - hrp.Position
-                            if offset.Magnitude > 0.05 then
-                                local escSpeed = math.clamp(farmSpeed, 5, FARM_SAFE_SPEED_CAP)
-                                local escStep = math.min(offset.Magnitude, escSpeed * dt, FARM_MAX_STEP)
-                                -- ruch po MIESZANCE (ucieczka + cel), nie prosto na cel:
-                                -- dzięki temu wciąż oddalamy się od mordercy, a
-                                -- jednocześnie docieramy do pickupa
-                                local step = (offset.Unit + moveDir) * 0.5
-                                if step.Magnitude < 0.01 then step = moveDir end
-                                hrp.CFrame = CFrame.new(hrp.Position + step.Unit * escStep)
-                                    * (hrp.CFrame - hrp.CFrame.Position)
-                            end
-                        else
-                            local escGoal = hrp.Position + escDir * (farmAvoidDist + 2)
-                            local escOffset = escGoal - hrp.Position
-                            if escOffset.Magnitude > 0.05 then
-                                local escSpeed = math.clamp(farmSpeed, 5, FARM_SAFE_SPEED_CAP)
-                                local escStep = math.min(escOffset.Magnitude, escSpeed * dt, FARM_MAX_STEP)
-                                hrp.CFrame = CFrame.new(hrp.Position + escOffset.Unit * escStep)
-                                    * (hrp.CFrame - hrp.CFrame.Position)
-                            end
-                        end
-                    elseif nearestCoin and (not hum or hum.Health > 0) then
-                        if hum then
-                            hum.PlatformStand = false
-                            hum.AutoRotate = false
-                        end
-
-                        -- ANTI-STUCK: dotarliśmy do monety i nic się nie dzieje →
-                        -- po FARM_STUCK_TIME czarna lista i lecimy do następnej
-                        if shortestDistance < 3 then
-                            if nearestCoin == farmStuckCoin then
-                                farmStuckClock = farmStuckClock + dt
-                            else
-                                farmStuckCoin, farmStuckClock = nearestCoin, 0
-                            end
-                            if farmStuckClock >= FARM_STUCK_TIME then
-                                -- odrzucamy monetę na KILKA SEKUND, nie na zawsze:
-                                -- stary kod dawał math.huge = moneta ignorowana do
-                                -- końca rundy, a farma przez to wyglądała na
-                                -- zepsutą (nie brała nawet monet, które dało się
-                                -- zebrać). Po 20 s wracamy do niej.
-                                coinBlacklist[nearestCoin] = now + FARM_BLACKLIST_TIME
-                                farmStuckCoin, farmStuckClock = nil, 0
-                            end
-                        else
-                            farmStuckCoin, farmStuckClock = nil, 0
-                        end
-
-                        hrp.Velocity = Vector3.new(0, 0, 0)
-                        hrp.RotVelocity = Vector3.new(0, 0, 0)
-
-                        -- cel: środek monety; gdy już jesteśmy w środku, jeździmy
-                        -- kółko wokół niej — Touched odpala się na POCZĄTKU
-                        -- kolizji, więc samo stanie w monety nie gwarantuje zbioru
-                        local goal = nearestCoin.Position
-                        if shortestDistance < 1.5 then
-                            local a = now * 8
-                            goal = nearestCoin.Position + Vector3.new(math.cos(a), 0, math.sin(a)) * 1.4
-                        end
-
-                        local offset = goal - hrp.Position
-                        local dist = offset.Magnitude
-                        if dist > 0.05 then
-                            -- ruch co klatkę: suwak przycięty do progu + twardy
-                            -- limit kroku, którego nie da się przekroczyć nawet po lagu
-                            local speed = math.clamp(farmSpeed, 5, FARM_SAFE_SPEED_CAP)
-                            local step = math.min(dist, speed * dt, FARM_MAX_STEP)
-                            local dir = offset.Unit
-                            if fleeWeight > 0 and awayFromMur then
-                                -- MIESZANKA: cel + ucieczka. Waga rośnie wraz ze
-                                -- zbliżaniem mordercy, ale farma NIE PRZESTAJE
-                                -- ZBIERAĆ — tylko skręca w bok od noża.
-                                -- (stary kod w tym miejscu w ogóle nie ruszał się
-                                -- do cukierka, tylko uciekał = zero cukierków)
-                                local w = fleeWeight * 0.6
-                                local bl = dir * (1 - w) + awayFromMur.Unit * w
-                                if bl.Magnitude > 0.01 then dir = bl.Unit end
-                            end
-                            local newPos = hrp.Position + dir * step
-                            local rot = hrp.CFrame - hrp.CFrame.Position
-                            hrp.CFrame = CFrame.new(newPos) * rot
-                        end
-                    else
-                        if hum then hum.AutoRotate = true end
-                        farmStuckCoin, farmStuckClock = nil, 0
-                    end
-                end
-            end)
-            if not ok then
-                -- BŁĄD W JEDNYM TICKU NIE MOŻE ZABIĆ PĘTLI FARMA:
-                -- bez pcall wyjątek kończył task.spawn i farma
-                -- milczała do restartu skryptu
-                warn("[SzpontHub] Auto Farm tick error: " .. tostring(err))
-                task.wait(0.5)
+    -- AUTOFARM "LEGIT" (v5): postać CHODZI do cukierka po drogach
+    -- ----------------------------------------------------------
+    -- Wcześniejsze wersje przesuwały postać przez CFrame - to teleport:
+    -- serwer MM2 taki ruch odrzuca ("Invalid position"), a postać
+    -- wpadała w ściany i farma stawała. Teraz:
+    --   * obracamy postać w stronę cukierka,
+    --   * każemy SILNIKOWI ją prowadzić (Humanoid:Move) - ruch jest
+    --     legalny (taki sam, jak gdyby gracz sam szedł),
+    --   * raycast wykrywa przeszkodę na drodze i postać ją OBCHODZI.
+    -- Efekt: postać chodzi (nie lata), nie przechodzi przez ściany,
+    -- serwer akceptuje ruch, a Touched cukierka działa.
+    -- ============================================================
+    -- NOCLIP TYLKO DLA TRYBU "LOT": postac leci przez sciany jak Fly, wiec
+    -- potrzebuje wylaczonej kolizji wlasnych czesci. Gdy wlaczony jest
+    -- "Auto Farm Legit" (chodzenie po drogach) kolizji NIE ruszamy - bez niej
+    -- postac przelatuje przez podloge i spada pod mape. Kolizji MAPY juz nie
+    -- ruszamy wcale - wczesniej zostawialy sie po niej dziury na reszte rundy.
+    runService.Stepped:Connect(function()
+        if not isCurrentGen() then return end
+        if not autoFarmCoins or farmLegit then return end
+        local ch = plr.Character
+        if not ch then return end
+        for _, part in ipairs(ch:GetChildren()) do
+            if part:IsA("BasePart") and part.CanCollide then
+                part.CanCollide = false
             end
+        end
+    end)
+
+    runService.RenderStepped:Connect(function(dt)
+        if not isCurrentGen() then return end
+        if not autoFarmCoins then return end
+        local ch = plr.Character
+        local hrp = getHRP(ch)
+        local hum = getHum(ch)
+        if not (hrp and hum) then return end
+
+        -- FLING W TOKU: wspolna petla flingu steruje CFrame co klatke.
+        -- Dwie petle walczace o pozycje = postac drga i serwer dostaje
+        -- niespojna predkosc (do tego kick za Invalid position).
+        if flingBack.active then
+            farmIdle = false   -- blokujemy tez TP Farm: on tez steruje CFrame
+            return
+        end
+
+        -- 1) lista monet: odśwież raz na sekundę (pełny skan workspace
+        --    jest za drogi na każdą klatkę)
+        coinScanClock = coinScanClock + dt
+        if coinScanClock >= FARM_SCAN_INTERVAL then
+            coinScanClock = 0
+            refreshCoinCache(false)
+        end
+
+        -- 1b) WOREK CUKIERKOW: pelny = FullBagIcon widoczny w aktywnej torbie
+        --     (sprawdzone na zywo w MM2: PlayerGui.MainGUI.Game.CoinBags.
+        --     CoinBagContainerScript -> dziecko-torba -> FullBagIcon.Visible).
+        --     Odswiezamy co 0.4 s, nie co klatke - to GUI, a nie model.
+        farmBag.clock = farmBag.clock + dt
+        if farmBag.clock >= 0.4 then
+            farmBag.clock = 0
+            farmBag.full = false
+            local bags = plr.PlayerGui:FindFirstChild("MainGUI")
+            bags = bags and bags:FindFirstChild("Game")
+            bags = bags and bags:FindFirstChild("CoinBags")
+            bags = bags and bags:FindFirstChild("CoinBagContainerScript")
+            if bags then
+                for _, bag in ipairs(bags:GetChildren()) do
+                    local icon = bag:FindFirstChild("FullBagIcon")
+                    if icon and icon.Visible then
+                        farmBag.full = true
+                        break
+                    end
+                end
+            end
+        end
+
+        -- 2) wygasanie blokad na monety
+        local now = os.clock()
+        for coin, untilT in pairs(coinBlacklist) do
+            if now >= untilT or not coin.Parent then
+                coinBlacklist[coin] = nil
+            end
+        end
+
+        -- 3) CEL: najbliższy żywy cukierek w zasięgu
+        local target, bestDist = nil, math.huge
+        for i = #coinCache, 1, -1 do
+            local c = coinCache[i]
+            if not isCoinAlive(c) then
+                table.remove(coinCache, i)
+            elseif not coinBlacklist[c] then
+                local d = (c.Position - hrp.Position).Magnitude
+                -- CHODZAC nie lecimy przez cala mape: mniejszy zasieg = czesciej
+                -- zawracamy i mniej scian do obchodzenia (legit ma dojsc szybko)
+                if d < bestDist and d <= (farmLegit and 100 or FARM_TARGET_RANGE) then
+                    bestDist = d
+                    target = c
+                end
+            end
+        end
+
+        -- 4) MORDERCA Z NOŻEM BLISKO → wstrzymujemy farmę (próg z suwaka)
+        if now >= farmMurderAt then
+            farmMurderAt = now + 0.5
+            farmMurderClose = false
+            for _, p in ipairs(playersService:GetPlayers()) do
+                if p ~= plr and p.Character and getRole(p) == "Murderer" then
+                    local mh = p.Character:FindFirstChild("HumanoidRootPart")
+                    if mh and (mh.Position - hrp.Position).Magnitude < farmPanicDist then
+                        farmMurderClose = true
+                        break
+                    end
+                end
+            end
+        end
+
+        -- 5) INFO w przycisku: farma mówi, dlaczego stoi
+        local powod = nil
+        if farmMurderClose then
+            powod = "pauza: morderca"
+        elseif target == nil then
+            if isInLobby(hrp.Position, 25) then
+                powod = "lobby"
+            else
+                powod = "brak cukierków"
+            end
+        end
+        local tekst = "Auto Farm Coins: ON"
+        if powod then tekst = "Auto Farm Coins: ON (" .. powod .. ")" end
+        if tekst ~= b13.Text then b13.Text = tekst end
+
+        -- 6) RUCH - DWA TRYBY:
+        --    Auto Farm Coins (farmLegit = OFF, domyslnie) = LOT jak w starej
+        --        wersji: teleport CFrame co klatke + noclip, przelatuje przez
+        --        sciany i zbiera wszystko. Auto-safety: gdy serwer cofa ruch,
+        --        zwalniamy (farmSpeedLimit), zeby nie wywalilo za Invalid position.
+        --    Auto Farm Legit (farmLegit = ON) = CHODZI silnikiem (Humanoid:Move)
+        --        i OMija sciany: raycast wykrywa przeszkode, a postac plynie
+        --        wzdluz niej (wall sliding) zamiast drgac w miejscu. Niskie
+        --        przeszkody przeskakuje (Jump), a nie obchodzi dookola.
+        if target and not farmMurderClose then
+            local dir = target.Position - hrp.Position
+            local dist = dir.Magnitude
+            local flat = Vector3.new(dir.X, 0, dir.Z)
+            if farmLegit then
+                if flat.Magnitude > 0.05 then
+                    flat = flat.Unit
+                    if farmRayParams.FilterDescendantsInstances[1] ~= ch then
+                        farmRayParams.FilterDescendantsInstances = { ch }
+                    end
+                    local ray = workspace:Raycast(hrp.Position, flat * 5, farmRayParams)
+                    if ray and ray.Instance.Name ~= "Coin_Server"
+                        and ray.Instance.Name ~= "CoinVisual"
+                        and not ray.Instance.Name:find("Coin", 1, true) then
+                        -- PRZESZKODA. Najpierw pytamy: czy nad nia jest wolne?
+                        -- (rzut na ~4 study nad torem) = murek/prog/skrzynia, wiec
+                        -- SKACZEMY i biegniemy dalej prosto. Stary kod zawsze omijal
+                        -- bokiem, wiec przy niskich progach postac stawala w scianie.
+                        local nad = workspace:Raycast(hrp.Position + Vector3.new(0, 4, 0), flat * 5, farmRayParams)
+                        if not nad then
+                            -- skok TYLKO z ziemi i z odstepem 0.8 s: bez tego
+                            -- postac podskakiwala w kazdej klatce stojac przed
+                            -- przeszkoda zamiast ja normalnie obejsc
+                            if now >= farmJumpAt and hum.FloorMaterial ~= Enum.Material.Air then
+                                farmJumpAt = now + 0.8
+                                hum.Jump = true
+                            end
+                        else
+                            -- WYSOKA SCIANA: plyniemy WZDLUZ niej. Normalna sciany ->
+                            -- tangent (kierunek wzdluz sciany) zwrcony w strone celu.
+                            -- Dzieki temu postac zjezdza ze sciany i dociera za naroznik -
+                            -- wczesniej skrecala "w bok" i co 0.6 s zmieniala strone,
+                            -- wiec dygotala przy scianie zamiast ja ominac.
+                            local n = Vector3.new(ray.Normal.X, 0, ray.Normal.Z)
+                            if n.Magnitude < 0.01 then
+                                n = Vector3.new(-flat.Z, 0, flat.X)
+                                if n.Magnitude < 0.01 then n = Vector3.new(0, 0, 1) end
+                            end
+                            n = n.Unit
+                            local tan = Vector3.new(-n.Z, 0, n.X)
+                            if tan:Dot(flat) < 0 then tan = -tan end
+                            flat = tan
+                            farmSideAt = os.clock()
+                        end
+                    end
+                    -- obrat + SILNIK (postac idzie po ziemi)
+                    hrp.CFrame = CFrame.lookAt(hrp.Position, hrp.Position + flat)
+                    hum:Move(flat, false)
+                    hum.WalkSpeed = math.clamp(farmSpeed, 16, 32)
+                    hum.AutoRotate = false
+                    hum.PlatformStand = false
+                end
+            else
+                -- LOT JAK OPCJA FLY (zakladka Movement): pozycje ustawiamy przez
+                -- CFrame co klatke i zerujemy Velocity - dokladnie tak, jak robi
+                -- tamtejszy Fly. Dlaczego to rozwiazuje problem: predkosc wyzerowana
+                -- = postac NIE PODLEGA GRAWITACJI. Wczesniej silnikowe chodzenie
+                -- w prostej linii do cukierka prowadzilo ja przez krawedz mapy
+                -- i spadala na smierc; teraz leci i nigdzie nie spada.
+                -- Kolizja postaci wylaczona w Stepped (patrz wyzej), wiec przeleca
+                -- przez sciany jak normalny Fly - nie trzeba juz "przepuszczac"
+                -- czesci mapy (a wiec i nie zostawia dziur w podlodze).
+                if dist > 1 then
+                    if hum then
+                        hum.PlatformStand = true  -- tak jak Fly: zawieszenie fizyki
+                        hum.AutoRotate = false
+                    end
+                    local dir3 = dir.Unit
+                    local speed = math.clamp(farmSpeed, 16, FARM_FLY_MAX_SPEED)
+                    local krok = math.min(dist, speed * dt, FARM_MAX_STEP)
+                    local nextPos = hrp.Position + dir3 * krok
+                    -- patrzymy w strone lotu (Fly tez patrzy w strone ruchu)
+                    hrp.CFrame = CFrame.new(nextPos, nextPos + dir3)
+                    -- Velocity = 0: zero grawitacji, zero wyrzucania za mape
+                    hrp.Velocity = Vector3.new(0, 0, 0)
+                end
+            end
+            -- ANTI-STUCK: blokujemy monete tylko przy BRAKU POSTEPU, a nie
+            -- po samym czasie. FARM_TARGET_RANGE = 200 studow, a przy chodzeniu
+            -- (WalkSpeed 16-32) moneta byla czesto dalej niz 3 s drogi - wiec
+            -- stary licznik blokowal JA ZANIM doszlismy. Efekt: wszystko
+            -- poszlo na liste ignorowanych, zostalo "brak cukierkow" i farma
+            -- stala. Teraz: dopoki dystans do celu maleje, jest OK;
+            -- dopiero zastanie w miejscu = blokada i szukamy dalej.
+            if target == farmStuckCoin then
+                if dist < farmStuckDist - 0.75 then
+                    farmStuckClock = 0
+                    farmStuckDist = dist
+                else
+                    farmStuckClock = farmStuckClock + dt
+                end
+            else
+                farmStuckCoin, farmStuckClock = target, 0
+                farmStuckDist = dist
+            end
+            if farmStuckClock >= FARM_STUCK_TIME then
+                coinBlacklist[target] = now + FARM_BLACKLIST_TIME
+                farmStuckCoin, farmStuckClock = nil, 0
+            end
+            farmIdle = false
+        else
+            hum:Move(Vector3.zero, false)
+            hum.AutoRotate = true
+            hum.PlatformStand = false -- tryb LOT wrocil do normalnej pozycji
+            farmStuckCoin, farmStuckClock, farmStuckDist = nil, 0, nil
+            farmIdle = (target == nil)
         end
     end)
 
@@ -3958,6 +4909,7 @@ function startMainScript()
 
     task.spawn(function()
         while true do
+            if not isCurrentGen() then return end
             if not isCurrentGen() then return end
             task.wait(0.1)
             if autoKillMurder and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
@@ -4012,6 +4964,7 @@ function startMainScript()
 
     task.spawn(function()
         while true do
+            if not isCurrentGen() then return end
             if not isCurrentGen() then return end
             task.wait(0.1)
             if autoKillAll and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
@@ -4080,6 +5033,7 @@ function startMainScript()
 
     runService.RenderStepped:Connect(function()
         if not isCurrentGen() then return end
+        if not isCurrentGen() then return end
         -- HRP na bieżąco (respawn = nowy model bez HumanoidRootPart)
         local hrp = getHRP(plr.Character)
         if spinbotEnabled and hrp then
@@ -4104,6 +5058,7 @@ function startMainScript()
     end)
 
     runService.RenderStepped:Connect(function()
+        if not isCurrentGen() then return end
         if triggerbot and plr.Character then
             if getRole(plr) ~= "Murderer" then
                 local tool = plr.Character:FindFirstChildOfClass("Tool")
@@ -4181,12 +5136,14 @@ function startMainScript()
 
     -- PPM tracking (BEZ gp — aimbot musi działać nawet gdy gra przetwarza input)
     uis.InputBegan:Connect(function(input)
+        if not isCurrentGen() then return end
         if input.UserInputType == Enum.UserInputType.MouseButton2 then
             mm2Ppm = true
         end
     end)
 
     uis.InputEnded:Connect(function(input)
+        if not isCurrentGen() then return end
         if input.UserInputType == Enum.UserInputType.MouseButton2 then
             mm2Ppm = false
         end
@@ -4194,6 +5151,7 @@ function startMainScript()
 
     -- Kółko FOV + Aimbot — RenderStepped (PO kamerze gry)
     runService.RenderStepped:Connect(function()
+        if not isCurrentGen() then return end
         if not isCurrentGen() then return end
         -- celuje dopiero przy PPM + rewolwer w ręce (jak BloxStrike)
         local armed = aimbotEnabled and mm2Ppm and getEquippedRevolver() ~= nil
@@ -4329,9 +5287,10 @@ function startMainScript()
             originalPos = nil
         end
     end)
-        if not isCurrentGen() then return end
 
     runService.RenderStepped:Connect(function()
+        if not isCurrentGen() then return end
+        if not isCurrentGen() then return end
         -- Auto TP Gun działa TYLKO dla żywego nie-mordercy: morderca ma nóż
         -- i rewolwer mu niepotrzebny, a martwej postaci nie teleportujemy w ogóle.
         -- Warunki sprawdzamy co klatkę, żeby reagować na śmierć/zmianę roli.
@@ -4382,9 +5341,11 @@ function startMainScript()
             end
         end
     end)
-        if not isCurrentGen() then return end
+
 
     runService.RenderStepped:Connect(function(dt)
+        if not isCurrentGen() then return end
+        if not isCurrentGen() then return end
         -- HRP na bieżąco (respawn = nowy model bez HumanoidRootPart)
         local hrp = getHRP(plr.Character)
         if flying and hrp then
@@ -4419,6 +5380,7 @@ function startMainScript()
     end)
 
     runService.Stepped:Connect(function()
+        if not isCurrentGen() then return end
         if noclip and plr.Character then
             for _, part in pairs(plr.Character:GetDescendants()) do
                 if part:IsA("BasePart") then part.CanCollide = false end
@@ -4434,6 +5396,7 @@ function startMainScript()
     end)
 
     runService.RenderStepped:Connect(function()
+        if not isCurrentGen() then return end
         -- Humanoid przez getHum: po respawnie model może go nie mieć
         local hum = getHum(plr.Character)
         if hum then
@@ -4455,6 +5418,7 @@ function startMainScript()
     end)
 
     runService.RenderStepped:Connect(function()
+        if not isCurrentGen() then return end
         for _, player in pairs(playersService:GetPlayers()) do
             if player ~= plr and player.Character then
                 local char = player.Character
@@ -4462,16 +5426,16 @@ function startMainScript()
                 if espEnabled and head then
                     local role = getRole(player)
                     local color = getRoleColor(role)
-                    local highlight = char:FindFirstChild("ESPHighlight") or Instance.new("Highlight", char)
-                    highlight.Name = "ESPHighlight"
+                    local highlight = char:FindFirstChild("SzpontESPHighlight") or Instance.new("Highlight", char)
+                    highlight.Name = "SzpontESPHighlight"
                     highlight.Adornee = char
                     highlight.FillColor = color
                     highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
                     highlight.FillTransparency = 0.5
                     highlight.OutlineTransparency = 0
 
-                    local billboard = head:FindFirstChild("ESPBillboard") or Instance.new("BillboardGui", head)
-                    billboard.Name = "ESPBillboard"
+                    local billboard = head:FindFirstChild("SzpontESPBillboard") or Instance.new("BillboardGui", head)
+                    billboard.Name = "SzpontESPBillboard"
                     billboard.Size = UDim2.new(0, 100, 0, 40)
                     billboard.StudsOffset = Vector3.new(0, 2.5, 0)
                     billboard.AlwaysOnTop = true
@@ -4486,10 +5450,10 @@ function startMainScript()
                     txt.Font = Enum.Font.SourceSansBold
                     txt.Text = player.Name .. "\n[" .. role .. "]"
                 else
-                    local highlight = char:FindFirstChild("ESPHighlight")
+                    local highlight = char:FindFirstChild("SzpontESPHighlight")
                     if highlight then highlight:Destroy() end
                     if head then
-                        local billboard = head:FindFirstChild("ESPBillboard")
+                        local billboard = head:FindFirstChild("SzpontESPBillboard")
                         if billboard then billboard:Destroy() end
                     end
                 end
@@ -5835,6 +6799,7 @@ function startBloxStrikeScript()
     sbTrig.MouseButton1Down:Connect(function() draggingTrig = true end)
 
     uis.InputEnded:Connect(function(i)
+        if not isCurrentGen() then return end
         if i.UserInputType == Enum.UserInputType.MouseButton1 then
             dragging1, dragging2, dragging3, dragging4 = false, false, false, false
             draggingTrig = false
@@ -5842,6 +6807,7 @@ function startBloxStrikeScript()
     end)
 
     uis.InputChanged:Connect(function(i)
+        if not isCurrentGen() then return end
         if i.UserInputType == Enum.UserInputType.MouseMovement then
             if dragging1 then
                 local rel = math.clamp((i.Position.X - sb1.AbsolutePosition.X) / sb1.AbsoluteSize.X, 0, 1)
@@ -5873,6 +6839,7 @@ function startBloxStrikeScript()
 
     -- Pokaż/ukryj menu (klawisz P)
     uis.InputBegan:Connect(function(i, gp)
+        if not isCurrentGen() then return end
         if gp then return end
         if i.KeyCode == Enum.KeyCode.P then
             local show = not mainFrame.Visible
@@ -5883,12 +6850,14 @@ function startBloxStrikeScript()
 
     -- PPM tracking (BEZ gp — aimbot musi działać nawet gdy gra przetwarza input)
     uis.InputBegan:Connect(function(input)
+        if not isCurrentGen() then return end
         if input.UserInputType == Enum.UserInputType.MouseButton2 then
             ppm = true
         end
     end)
 
     uis.InputEnded:Connect(function(input)
+        if not isCurrentGen() then return end
         if input.UserInputType == Enum.UserInputType.MouseButton2 then
             ppm = false
         end
@@ -5967,6 +6936,7 @@ function startBloxStrikeScript()
 
     -- FOV Circle + Crosshair + Aimbot — działa na RenderStepped (PO CameraController)
     runService.RenderStepped:Connect(function()
+        if not isCurrentGen() then return end
         -- Aktualizacja FOV Circle
         if aimbotEnabled then
             local viewportSize = cam.ViewportSize
@@ -6194,6 +7164,7 @@ function startBloxStrikeScript()
     -- triggerDelayMs = minimalna przerwa między strzałami w ms (0 = co klatkę,
     -- czyli jak przed dodaniem suwaka). tick() daje sekundy, liczymy cooldown.
     runService.RenderStepped:Connect(function()
+        if not isCurrentGen() then return end
         if triggerbot and plr.Character and crosshairEnemy() then
             local now = tick()
             if now - lastTriggerShot >= triggerDelayMs / 1000 then
@@ -6709,11 +7680,13 @@ function startBloxStrikeScript()
     local draggingTP = false
     sbTP.MouseButton1Down:Connect(function() draggingTP = true end)
     uis.InputEnded:Connect(function(i)
+        if not isCurrentGen() then return end
         if i.UserInputType == Enum.UserInputType.MouseButton1 then
             draggingTP = false
         end
     end)
     uis.InputChanged:Connect(function(i)
+        if not isCurrentGen() then return end
         if draggingTP and i.UserInputType == Enum.UserInputType.MouseMovement then
             local rel = math.clamp((i.Position.X - sbTP.AbsolutePosition.X) / sbTP.AbsoluteSize.X, 0, 1)
             sfTP.Size = UDim2.new(rel, 0, 1, 0)
@@ -6729,6 +7702,7 @@ function startBloxStrikeScript()
     -- gry (mysz juz obrocila modul domyslny), wiec widok reaguje na mysz,
     -- a strzaly (ray z CFrame kamery) leca dokladnie tam, gdzie patrzy krzyzyk.
     local function tpApply()
+        if not isCurrentGen() then return end
         if not thirdPerson then return end
         -- Caly korpus w pcall + kody na przycisku: zaden powod stopu nie jest cichy.
         -- BloxStrike ma WLASNE postacie (brak Humanoida) — zywotnosc bierzemy
@@ -7446,6 +8420,7 @@ function startBloxStrikeScript()
     end
 
     runService.Heartbeat:Connect(function()
+        if not isCurrentGen() then return end
         if bhopUnlocker then
             ensureBhopUnlock()
         end
@@ -7526,6 +8501,7 @@ function startBloxStrikeScript()
     local instDefSent, instPlantSent = false, false
 
     runService.Heartbeat:Connect(function()
+        if not isCurrentGen() then return end
         if not (instantBomb and RemotesBS) then
             instDefSent, instPlantSent = false, false
             return
@@ -7586,6 +8562,7 @@ function startBloxStrikeScript()
     local bhopUis = game:GetService("UserInputService")
     local bhopSuppressed = false
     runService.Heartbeat:Connect(function()
+        if not isCurrentGen() then return end
         if not CharacterController then
             return
         end
@@ -7623,6 +8600,7 @@ function startBloxStrikeScript()
 
     -- No Recoil: reset CameraOffset (backup — główne blokowanie jest w enableNoRecoil)
     runService.RenderStepped:Connect(function()
+        if not isCurrentGen() then return end
         if noRecoil and plr.Character then
             local hum = plr.Character:FindFirstChildOfClass("Humanoid")
             if hum then
@@ -7633,6 +8611,7 @@ function startBloxStrikeScript()
 
     -- Hitbox Expander (powiększa TYLKO hitbox głowy wrogów, nie całego ciała)
     runService.Heartbeat:Connect(function()
+        if not isCurrentGen() then return end
         if hitboxExpander then
             for _, p in pairs(playersService:GetPlayers()) do
                 if p ~= plr and p.Character and isEnemy(p) then
@@ -7655,6 +8634,7 @@ function startBloxStrikeScript()
 
     -- Fullbright
     runService.RenderStepped:Connect(function()
+        if not isCurrentGen() then return end
         if fullbright then
             lighting.Brightness = 2
             lighting.ClockTime = 14
@@ -7678,6 +8658,30 @@ function startBloxStrikeScript()
     startBsEspNew(function() return espEnabled end)
 
     updateActiveCheatsList()
+    -- TEARDOWN instancji BloxStrike: to samo co w MM2 - wszystkie opcje
+    -- OFF, stan swiata przywrocony, stare GUI zniszczone.
+    if type(getgenv) == "function" then
+        getgenv().SzpontHubTeardown = function()
+            pcall(function()
+                aimbotEnabled = false
+                espEnabled = false
+                triggerbot = false
+                bunnyHop = false
+                bhopUnlocker = false
+                speedHack = false
+                hitboxExpander = false
+                noRecoil = false
+                noSpread = false
+                fullbright = false
+                crosshairEnabled = false
+                thirdPerson = false
+                instantBomb = false
+                restoreWorldState()
+                if bsGui then bsGui:Destroy() end
+                if bsCheatsGui then bsCheatsGui:Destroy() end
+            end)
+        end
+    end
 end
 
 ------------------------------------------------------------
@@ -7881,6 +8885,7 @@ function startFischScript()
         if not (autoCast or autoShake or autoReel) then return end
         fishingLoopAlive = true
         task.spawn(function()
+            if not isCurrentGen() then return end
             -- getgenv().SzpontFischStop = true => pilne zatrzymanie
             -- petli z poziomu konsoli (bez GUI). Co 0.05 s = shake
             -- klika w kazdym dozwolonym oknie throttle gry
@@ -8005,6 +9010,7 @@ function startFischScript()
         local btn = pick:FindFirstChild("button")
         if not btn then return end
         task.spawn(function()
+            if not isCurrentGen() then return end
             pcall(function() firesignal(btn.MouseButton1Click) end)
         end)
         appraiseNextOpen = tick() + 2.5
@@ -8015,6 +9021,7 @@ function startFischScript()
         appraiseLoopAlive = true
         task.spawn(function()
             while true do
+                if not isCurrentGen() then return end
                 task.wait(0.5)
                 local stop, on = false, false
                 pcall(function()
@@ -8084,6 +9091,7 @@ function startFischScript()
 
     -- Pokaż/ukryj menu (klawisz P) — jak w panelach MM2/BS/Rivals
     uis.InputBegan:Connect(function(i, gp)
+        if not isCurrentGen() then return end
         if gp then return end
         if i.KeyCode == Enum.KeyCode.P then
             mainFrame.Visible = not mainFrame.Visible
@@ -8527,6 +9535,7 @@ function startFischScript()
     -- NAD celem zamiast w nim; w tym trybie PivotTo 1:1 na pozycji.
     local function tpCore(x, y, z, name, status, exact)
         task.spawn(function()
+            if not isCurrentGen() then return end
             local plr = game:GetService("Players").LocalPlayer
             local ch = plr.Character
             local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
@@ -8764,6 +9773,7 @@ function startFischScript()
         evList.Visible = true
         evBtn.ZIndex = 8
         task.spawn(function()
+            if not isCurrentGen() then return end
             local evs = scanEvents() -- mapa bywa duża: skan poza wątkiem GUI
             if #evs == 0 then
                 evStatus.Text = "Brak eventów - spróbuj ponownie później."
@@ -8851,6 +9861,7 @@ function startFischScript()
         if auBusy then return end
         auBusy = true
         task.spawn(function()
+            if not isCurrentGen() then return end
             local meteo = "?"
             pcall(function()
                 meteo = game:GetService("ReplicatedStorage").world.weather.meteorological.Value
@@ -9167,6 +10178,7 @@ function startFischScript()
                     instantLoopAlive = true
                     task.spawn(function()
                         while true do
+                            if not isCurrentGen() then return end
                             task.wait(1)
                             local env = envOf()
                             if env.SzpontUtilityStop == true then break end
@@ -9201,6 +10213,7 @@ function startFischScript()
         utilityLoopAlive = true
         task.spawn(function()
             while true do
+                if not isCurrentGen() then return end
                 local dt = task.wait(0.01)
                 local env = envOf()
                 if env.SzpontUtilityStop == true then break end
@@ -9259,6 +10272,7 @@ function startFischScript()
     -- SPEED jak MM2: wymuszany co klatkę, gdy ON (gra nie zdąży
     -- nadpisać WalkSpeed); OFF = oryginał zapisany przy włączeniu.
     runService.RenderStepped:Connect(function()
+        if not isCurrentGen() then return end
         local st = envOf().SzpontUtility
         if st and st.speed then
             pcall(function()
@@ -9271,6 +10285,7 @@ function startFischScript()
 
     -- NOCLIP jak MM2: co klatkę physics zdejmuj kolizję postaci.
     runService.Stepped:Connect(function()
+        if not isCurrentGen() then return end
         local st = envOf().SzpontUtility
         if st and st.noclip then
             pcall(function()
@@ -9287,6 +10302,7 @@ function startFischScript()
     -- FULLBRIGHT: wymuszany co klatkę (gra może zmieniać oświetlenie
     -- cyklem dnia/nocy albo zależnie od strefy).
     runService.RenderStepped:Connect(function()
+        if not isCurrentGen() then return end
         local st = envOf().SzpontUtility
         if st and st.fullbright then
             pcall(function()
@@ -9464,11 +10480,13 @@ function startFischScript()
     sbFly.MouseButton1Down:Connect(function() draggingFly = true end)
     sbWalk.MouseButton1Down:Connect(function() draggingWalk = true end)
     uis.InputEnded:Connect(function(i)
+        if not isCurrentGen() then return end
         if i.UserInputType == Enum.UserInputType.MouseButton1 then
             draggingFly, draggingWalk = false, false
         end
     end)
     uis.InputChanged:Connect(function(i)
+        if not isCurrentGen() then return end
         if i.UserInputType ~= Enum.UserInputType.MouseMovement then return end
         if draggingFly then
             local rel = math.clamp((i.Position.X - sbFly.AbsolutePosition.X) / sbFly.AbsoluteSize.X, 0, 1)
@@ -10361,6 +11379,7 @@ function startRivalsScript()
             pcall(noSpreadReassert)
         end)
         task.spawn(function()
+            if not isCurrentGen() then return end
             while noSpread do
                 task.wait(2) -- pełny skan: świeże instancje po zmianie broni
                 if not noSpread then break end
@@ -10440,6 +11459,7 @@ function startRivalsScript()
     end
 
     runService.RenderStepped:Connect(function()
+        if not isCurrentGen() then return end
         if not triggerbot then return end
         local ch = plr.Character
         if not ch then return end
@@ -10476,6 +11496,7 @@ function startRivalsScript()
     sbSpeed.MouseButton1Down:Connect(function() draggingSpeed = true end)
 
     uis.InputEnded:Connect(function(i)
+        if not isCurrentGen() then return end
         if i.UserInputType == Enum.UserInputType.MouseButton1 then
             draggingFov = false
             draggingSpeed = false
@@ -10483,6 +11504,7 @@ function startRivalsScript()
     end)
 
     uis.InputChanged:Connect(function(i)
+        if not isCurrentGen() then return end
         if i.UserInputType == Enum.UserInputType.MouseMovement then
             if draggingFov then
                 local rel = math.clamp((i.Position.X - sbFov.AbsolutePosition.X) / sbFov.AbsoluteSize.X, 0, 1)
@@ -10502,12 +11524,14 @@ function startRivalsScript()
 
     -- PPM tracking (BEZ gp — aimbot musi działać nawet gdy gra przetwarza input)
     uis.InputBegan:Connect(function(input)
+        if not isCurrentGen() then return end
         if input.UserInputType == Enum.UserInputType.MouseButton2 then
             ppm = true
         end
     end)
 
     uis.InputEnded:Connect(function(input)
+        if not isCurrentGen() then return end
         if input.UserInputType == Enum.UserInputType.MouseButton2 then
             ppm = false
         end
@@ -10560,6 +11584,7 @@ function startRivalsScript()
 
     -- Aimbot + FOV Circle — RenderStepped (PO kamerze gry)
     runService.RenderStepped:Connect(function()
+        if not isCurrentGen() then return end
         -- Aktualizacja FOV Circle
         if aimbotEnabled then
             local viewportSize = cam.ViewportSize
@@ -10685,6 +11710,7 @@ function startRivalsScript()
     -- ESP (Highlight + tabliczka: wrogowie na czerwono, team na zielono)
     -- Nazwy Rivals* nie kolidują z ESP BloxStrike (BS*), gdyby oba były włączone.
     runService.RenderStepped:Connect(function()
+        if not isCurrentGen() then return end
         for _, player in pairs(playersService:GetPlayers()) do
             if player ~= plr and player.Character then
                 local char = player.Character
@@ -10734,6 +11760,7 @@ function startRivalsScript()
 
     -- Pokaż/ukryj menu (klawisz P)
     uis.InputBegan:Connect(function(i, gp)
+        if not isCurrentGen() then return end
         if gp then return end
         if i.KeyCode == Enum.KeyCode.P then
             local show = not mainFrame.Visible
@@ -10743,6 +11770,10 @@ function startRivalsScript()
     end)
 
     updateActiveCheatsList()
+    -- TEARDOWN tej instancji: jesli skrypt zostanie wykonany drugi raz,
+    -- nowa instancja wywola to i stara wersja sprzata po sobie -
+    -- najpierw wylacza WSZYSTKIE opcje, potem przywraca stan swiata
+    -- i niszczy swoje GUI. Nic nie zostaje w grze.
 end
 
 ------------------------------------------------------------
