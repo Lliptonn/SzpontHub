@@ -5444,6 +5444,251 @@ function startMainScript()
         return { btn = bCandy, lbl = lbl }
     end)()
 
+    -- ============================================================
+    -- MAP PICKER (Exploits): co runde gra daje 3 mapy do wyboru.
+    -- GUI glosowania tworzy sie DOPiero w fazie glosowania (nie ma go w lobby,
+    -- nie ma remote'a ani folderu map), wiec poller szuka go na zycie co 0.7 s
+    -- i lustruje jego przyciski = nazwy aktualnych map.
+    -- GLOS = dotkniecie padlka (Touched na padzie gry).
+    -- SPAM GLOSOW: jak klikniesz mape, picker teleportuje Cie na padlek ->
+    --   glos -> RESET postaci -> odrodzenie -> znow glos... w kolko az do
+    --   konca glosowania. To ten exploit, o ktorym mowiles ("reset na wybranej
+    --   mapie = drugi glos w nieskonczonosc"): wczesniej robilismy JEDEN glos,
+    --   wiec Twoja mapa (np. Mineshaft) przegrywala. Teraz Twoja mapa zbiera
+    --   najwiecej glosow i zawsze wygrywa. Klik zatrzymuje spam.
+    -- ============================================================
+    local mapUi = { voted = false, aktywne = false, oddane = nil, btns = {}, spamOn = false, spamMapa = nil, spamGen = 0 }
+
+    mapUi.status = Instance.new("TextLabel")
+    mapUi.status.Size = UDim2.new(0.95, 0, 0, 26)
+    mapUi.status.BackgroundTransparency = 1
+    mapUi.status.TextColor3 = themes[currentTheme].TextCol
+    mapUi.status.TextSize = 11
+    mapUi.status.Font = Enum.Font.SourceSansBold
+    mapUi.status.TextXAlignment = Enum.TextXAlignment.Left
+    mapUi.status.Text = "Map Picker: czekam na glosowanie map..."
+    mapUi.status.LayoutOrder = 3
+    mapUi.status.ZIndex = 3
+    mapUi.status.Parent = pages["Exploits"]
+    table.insert(allLabels, mapUi.status)
+
+    -- kontener na dynamiczne przyciski map
+    mapUi.box = Instance.new("Frame")
+    mapUi.box.Name = "MapPickerBox"
+    mapUi.box.Size = UDim2.new(0.95, 0, 0, 0)
+    mapUi.box.AutomaticSize = Enum.AutomaticSize.Y
+    mapUi.box.BackgroundTransparency = 1
+    mapUi.box.LayoutOrder = 4
+    mapUi.box.ZIndex = 3
+    mapUi.box.Parent = pages["Exploits"]
+    do
+        local lay = Instance.new("UIListLayout")
+        lay.Padding = UDim.new(0, 4)
+        lay.SortOrder = Enum.SortOrder.LayoutOrder
+        lay.HorizontalAlignment = Enum.HorizontalAlignment.Center
+        lay.Parent = mapUi.box
+    end
+
+    -- zbiera NAZWY map z padlkow glosowania w lobby (tam sa zawsze 3 mapy).
+    -- Struktura gry: Workspace.Lobby.VotePads.VotePadN ma czesc Pad (ja trzeba
+    -- dotknac = glos) + SurfaceGui VoteInfoGui.Container.MapName (nazwa mapy)
+    -- i .Votes (licznik glosow, np "Votes: 4"). Wczesniej szukalem GUI glosowania
+    -- po nazwach - ale to GUI w tej grze NIE ISTNIEJE (glos to dotkniecie padlka),
+    -- wiec picker pisal "czekam" mimo ze wybieranie bylo na ekranie.
+    mapUi.zbierz = function()
+        local mapa, ile = {}, 0
+        local vps = workspace:FindFirstChild("Lobby")
+        vps = vps and vps:FindFirstChild("VotePads")
+        if not vps then return mapa, 0 end
+        for _, d in ipairs(vps:GetChildren()) do
+            if d:IsA("Model") then
+                local gui = d:FindFirstChild("VoteInfoGui")
+                local cont = gui and gui:FindFirstChild("Container")
+                local mn = cont and cont:FindFirstChild("MapName")
+                local vt = cont and cont:FindFirstChild("Votes")
+                local pad = d:FindFirstChild("Pad")
+                if mn and pad and mn.Text ~= "" then
+                    mapa[mn.Text] = { pad = pad, votes = vt and vt.Text or "" }
+                    ile = ile + 1
+                end
+            end
+        end
+        return mapa, ile
+    end
+
+    -- GLOSOWANIE PRZEZ SPAM: dotyk padlka = glos, a RESET postaci pozwala
+    -- zaglosowac PONOWNIE (to ten exploit, o ktorym mowiles: "jak resetniesz
+    -- sie na mapie ktora wybrales to drugi glos mozesz dodac i tak w
+    -- nieskonczonosc"). Wcześniej robilismy JEDEN glos - wiec Twoja mapa
+    -- (Mineshaft) przegrywala z glosami innych. Teraz: teleport na pad ->
+    -- glos -> reset -> odrodzenie -> znow glos... petla az do konca
+    -- glosowania, wiec TWOJA mapa zawsze zbiera najwiecej glosow.
+    mapUi.glosuj = function(nazwa, info, mojBtn)
+        local pad = info and info.pad
+        if not pad then
+            mapUi.status.Text = "Map Picker: brak padlka"
+            return
+        end
+        if mapUi.spamOn and mapUi.spamMapa == nazwa then
+            -- klik w TA SAMA mape = STOP (drugi klik na aktywnej mape konczy
+            -- spam). Wcześniej zatrzymywal kazdy klik - teraz tylko ten sam.
+            mapUi.spamGen = mapUi.spamGen + 1   -- zabija stara petle
+            mapUi.spamOn = false
+            mapUi.spamMapa = nil
+            mapUi.status.Text = "Map Picker: zatrzymano"
+            return
+        end
+        -- klik w INNA mape (albo pierwszy) = start/naprzemiana: nowy numer
+        -- generacji, wiec STARA petla sama sie konczy i nie walczy z nowa
+        mapUi.spamGen = mapUi.spamGen + 1
+        local mojGen = mapUi.spamGen
+        mapUi.spamOn = true
+        mapUi.spamMapa = nazwa
+        mapUi.oddane = nazwa
+        if mojBtn then
+            mojBtn.Text = "Spam: " .. nazwa
+            mojBtn.BackgroundColor3 = themes[currentTheme].Primary
+        end
+        mapUi.status.Text = "Map Picker: glosuje za " .. nazwa .. "..."
+        task.spawn(function()
+            local licznik = 0
+            -- LIMIT 12 GLOSOW: po 12 petla sama sie konczy. Sprawdzamy tez
+            -- generacje - po przełączeniu na inna mape stara petla (inny numer)
+            -- przestaje pracowac i nie walczy z nowa o CFrame postaci.
+            while mapUi.spamOn and mapUi.spamGen == mojGen and licznik < 12 do
+                if not isCurrentGen() then return end
+                -- pad zniknal = glosowanie sie skonczylo -> koniec
+                if not (pad and pad.Parent) then break end
+                local ch = plr.Character
+                local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    -- NA PADLEK: Touched na serwerze zarejestruje glos
+                    hrp.CFrame = CFrame.new(pad.Position + Vector3.new(0, 3, 0))
+                    hrp.Velocity = Vector3.new(0, 0, 0)
+                    hrp.RotVelocity = Vector3.new(0, 0, 0)
+                    hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                    hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                    task.wait(0.28)
+                    -- RESET: pozwala zaglosowac ponownie (exploit gry)
+                    licznik = licznik + 1
+                    mapUi.status.Text = "Map Picker: " .. nazwa .. " (glos " .. licznik .. ")"
+                    pcall(function() ch:BreakJoints() end)
+                    -- czekaj az sie odrodzi (max 4 s)
+                    local t = 0
+                    while mapUi.spamOn and t < 4 do
+                        task.wait(0.1)
+                        t = t + 0.1
+                        local c2 = plr.Character
+                        local h2 = c2 and c2:FindFirstChildOfClass("Humanoid")
+                        if h2 and h2.Health > 0 then break end
+                    end
+                end
+                task.wait(0.15)
+            end
+            -- konczy sie TYLKO petla o naszym numerze generacji - po
+            -- przełączeniu na inna mape stara petla nie moze skasowac
+            -- stanu nowej (spamOn/spamMapa naleza juz do niej)
+            if mapUi.spamGen == mojGen then
+                mapUi.spamOn = false
+                mapUi.spamMapa = nil
+                if isCurrentGen() and mapUi.status then
+                    mapUi.status.Text = licznik >= 12
+                        and ("Map Picker: " .. tostring(mapUi.oddane or "") .. " - limit 12 glosow")
+                        or ("Map Picker: zakonczono (glosow: " .. licznik .. ")")
+                end
+            end
+        end)
+    end
+
+    -- buduje przyciski map w zakladce (kazdy = glos na dana mape)
+    -- info = { pad = czesc padlka, votes = tekst licznika np "Votes: 4" }
+    mapUi.odbuduj = function(mapa)
+        for _, b in ipairs(mapUi.btns) do pcall(function() b:Destroy() end) end
+        mapUi.btns = {}
+        local i = 0
+        for nazwa, info in pairs(mapa) do
+            i = i + 1
+            local b = Instance.new("TextButton")
+            b.Size = UDim2.new(1, 0, 0, 26)
+            b.BackgroundColor3 = themes[currentTheme].ButtonBg
+            b.BorderSizePixel = 1
+            b.BorderColor3 = themes[currentTheme].Primary
+            b.TextColor3 = Color3.fromRGB(255, 255, 255)
+            b.TextSize = 12
+            b.Font = Enum.Font.SourceSansBold
+            -- pokazuje tez licznik glosow, zeby bylo widac aktualny stan
+            b.Text = nazwa .. (info.votes ~= "" and ("  [" .. info.votes .. "]") or "")
+            b.LayoutOrder = i
+            b.ZIndex = 4
+            b.Parent = mapUi.box
+            b.MouseButton1Click:Connect(function()
+                mapUi.glosuj(nazwa, info, b)
+            end)
+            table.insert(mapUi.btns, b)
+        end
+    end
+
+    -- POLLER: co 0.7 s czyta padlki. Gdy sa - odswieza przyciski (nazwy +
+    -- liczniki glosow na zywo). Gdy zniknelo (nowa runda) - resetujemy flage,
+    -- wiec w nowej rundzie glosujemy od nowa.
+    task.spawn(function()
+        local poprzedni = nil
+        while true do
+            if not isCurrentGen() then return end
+            task.wait(0.7)
+            local mapa, ile = mapUi.zbierz()
+            if ile > 0 then
+                -- sygnatura = nazwy map w tej rundzie (zmienia sie co runde)
+                local syg = {}
+                for n in pairs(mapa) do table.insert(syg, n) end
+                table.sort(syg)
+                local kluczRundy = table.concat(syg, "|")
+                if kluczRundy ~= poprzedni then
+                    -- NOWA RUNDA (zmienily sie mapy) - reset glosu
+                    poprzedni = kluczRundy
+                    mapUi.aktywne = true
+                    mapUi.voted = false
+                    mapUi.oddane = nil
+                    mapUi.spamMapa = nil
+                    mapUi.spamGen = mapUi.spamGen + 1  -- zabija stara petle spamu
+                end
+                -- odswiez przyciski, ale NIE kasuj podswietlenia juz oddanego
+                local oddane = mapUi.oddane
+                local trwaSpam = mapUi.spamOn
+                local aktywna = mapUi.spamMapa or oddane
+                mapUi.odbuduj(mapa)
+                if aktywna then
+                    -- przywracamy podswietlenie: "Spam:" gdy trwa, "OK:" gdy juz oddano
+                    for _, b in ipairs(mapUi.btns) do
+                        if b.Text:find(aktywna, 1, true) then
+                            b.Text = (trwaSpam and "Spam: " or "OK: ") .. aktywna
+                            b.BackgroundColor3 = themes[currentTheme].Primary
+                        end
+                    end
+                end
+                -- status NADPISUJ tylko gdy nie trwa spam (spam sam liczy glosy
+                -- co petle - nadpisanie kasowaloby licznik "glos N")
+                if not mapUi.spamOn then
+                    mapUi.status.Text = mapUi.voted
+                        and ("Map Picker: zaglosowano na " .. tostring(mapUi.oddane))
+                        or ("Map Picker: wybierz mape (" .. ile .. " dostepnych)")
+                end
+            elseif mapUi.aktywne then
+                -- glosowanie sie skonczylo / nowa runda - resetujemy do zera
+                poprzedni = nil
+                mapUi.aktywne = false
+                mapUi.voted = false
+                mapUi.oddane = nil
+                mapUi.spamOn = false
+                mapUi.spamMapa = nil
+                mapUi.spamGen = mapUi.spamGen + 1
+                for _, b in ipairs(mapUi.btns) do pcall(function() b:Destroy() end) end
+                mapUi.btns = {}
+                mapUi.status.Text = "Map Picker: czekam na glosowanie map..."
+            end
+        end
+    end)
+
     -- AUTOFARM "LEGIT" (v5): the character WALKS to the candy along the paths
     -- ----------------------------------------------------------
     -- Earlier versions moved the character via CFrame - that is a teleport:
