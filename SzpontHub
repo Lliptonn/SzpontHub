@@ -1,3 +1,8 @@
+--!nocheck
+-- (dyrektywa toolingu: wylacza typechecker w lintach executorow. Powod: plik
+-- to jedna funkcja 13k+ linii = analizator wywala sie "Code is too complex
+-- to typecheck" i plodzi 13 falszywych bledow typow. Na WYKONANIE nie wplywa
+-- w zaden sposob - kompilator Luau traktuje to jak komentarz.)
 -- SZPONT FULL MENU + KEY SYSTEM (MM2 + BLOXSTRIKE + RIVALS)
 -- After entering a valid key, the GAME SELECTION MENU appears:
 --    MM2         full MM2 hack menu
@@ -5,7 +10,7 @@
 --    Rivals      Rivals hack menu (options added later)
 print("chuj ci w dupe :D")
 -- version marker: right after inject you can see in the console WHICH file started
-print("[SzpontHub] build ESP-v2 start")
+print("[SzpontHub] build r5 28.10.2026 - CandySpoof+CoinESP+AimFix")
 -- Players via GetService: game.Players with a dot does not work in this DataModel
 local playersService = game:GetService("Players")
 local plr = playersService.LocalPlayer
@@ -14,7 +19,7 @@ local runService = game:GetService("RunService")
 
 local uis = game:GetService("UserInputService")
 local vu = game:GetService("VirtualUser")
-local tweenService = game:GetService("TweenService")
+local _tweenService = game:GetService("TweenService")
 local lighting = game:GetService("Lighting")
 
 ------------------------------------------------------------
@@ -62,6 +67,10 @@ local function restoreWorldState()
                 lighting.ClockTime = orig.clock
             end
         end
+        -- Infinite Zoom: limit zoomu wraca do normy - bez tego po kazdym
+        -- odpaleniu zostawal 100000 i "nieskonczony zoom" dzialal przy
+        -- wylaczonej opcji
+        if plr.CameraMaxZoomDistance >= 100000 then plr.CameraMaxZoomDistance = 128 end
         -- ESP highlights
         for _, p in ipairs(playersService:GetPlayers()) do
             if p.Character then
@@ -321,20 +330,25 @@ end)
 ------------------------------------------------------------
 
 ------------------------------------------------------------
--- KEY SYSTEM (ORANGE)
+-- UGC GATE (zamiast starego KEYSYSTEMU "lipton")
 ------------------------------------------------------------
+-- Ekran startowy: komunikat "kup moje UGC" + link. Znajomi NIE kupuja UGC -
+-- wchodza ukrytym FRIEND KEYSYSTEM (klik w worek w grze, patrz nizej).
+-- Jak UGC powstanie: wklej link w UGC_LINK i ID w UGC_ID - wtedy
+-- wlasciciele UGC wchodza AUTOMATYCZNIE (sprawdzanie wlasnosci nizej).
+local UGC_LINK = "LINK COMING SOON"   -- << TU WKLEJ LINK DO UGC
+local UGC_ID = 0                  -- << TU WKLEJ ID UGC (0 = jeszcze nie ma)
+
 local keyGui = Instance.new("ScreenGui")
 keyGui.Name = "LiptonHubKeySystem"
 keyGui.ResetOnSpawn = false
 keyGui.Parent = targetParent
--- the window starts HIDDEN: the DEV check at the bottom decides whether anyone
--- sees it at all (the owner's IP/HWID never does), everyone else gets it
--- either after the check or after the 2 s fallback timeout
+-- okno startuje UKRYTE: sprawdzenie na dole je wlacza (albo 2 s fallback)
 keyGui.Enabled = false
 
 local keyFrame = Instance.new("Frame")
-keyFrame.Size = UDim2.new(0, 260, 0, 150)
-keyFrame.Position = UDim2.new(0.5, -130, 0.5, -75)
+keyFrame.Size = UDim2.new(0, 300, 0, 170)
+keyFrame.Position = UDim2.new(0.5, -150, 0.5, -85)
 keyFrame.BackgroundColor3 = Color3.fromRGB(12, 5, 15)
 keyFrame.BackgroundTransparency = 0.15
 keyFrame.BorderSizePixel = 2
@@ -348,46 +362,36 @@ keyTitle.Size = UDim2.new(1, 0, 0, 35)
 keyTitle.BackgroundColor3 = Color3.fromRGB(170, 50, 255)
 keyTitle.BackgroundTransparency = 0.2
 keyTitle.BorderSizePixel = 0
-keyTitle.Text = " LiptonHub Key System "
+keyTitle.Text = " Unlock the Hub "
 keyTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
 keyTitle.TextSize = 15
 keyTitle.Font = Enum.Font.SourceSansBold
 keyTitle.Parent = keyFrame
 
-local keyBox = Instance.new("TextBox")
-keyBox.Size = UDim2.new(0.85, 0, 0, 35)
-keyBox.Position = UDim2.new(0.075, 0, 0.35, 0)
-keyBox.BackgroundColor3 = Color3.fromRGB(20, 10, 25)
-keyBox.BorderColor3 = Color3.fromRGB(170, 50, 255)
-keyBox.BorderSizePixel = 1
-keyBox.PlaceholderText = "Enter key..."
-keyBox.Text = ""
-keyBox.TextColor3 = Color3.fromRGB(255, 255, 255)
-keyBox.PlaceholderColor3 = Color3.fromRGB(160, 130, 200)
-keyBox.TextSize = 14
-keyBox.Font = Enum.Font.SourceSansBold
-keyBox.Parent = keyFrame
+local ugcMsg = Instance.new("TextLabel")
+ugcMsg.Size = UDim2.new(0.9, 0, 0, 45)
+ugcMsg.Position = UDim2.new(0.05, 0, 0, 48)
+ugcMsg.BackgroundTransparency = 1
+ugcMsg.Text = "Hey! To unlock the hub, please grab my UGC item. Thanks a lot for your support! <3"
+ugcMsg.TextColor3 = Color3.fromRGB(255, 255, 255)
+ugcMsg.TextSize = 14
+ugcMsg.TextWrapped = true
+ugcMsg.Font = Enum.Font.SourceSansBold
+ugcMsg.Parent = keyFrame
 
-local keyBtn = Instance.new("TextButton")
-keyBtn.Size = UDim2.new(0.85, 0, 0, 30)
-keyBtn.Position = UDim2.new(0.075, 0, 0.68, 0)
-keyBtn.BackgroundColor3 = Color3.fromRGB(170, 50, 255)
-keyBtn.BorderSizePixel = 0
-keyBtn.Text = "Confirm"
-keyBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-keyBtn.TextSize = 14
-keyBtn.Font = Enum.Font.SourceSansBold
-keyBtn.Parent = keyFrame
-
-local wrongLabel = Instance.new("TextLabel")
-wrongLabel.Size = UDim2.new(1, 0, 0, 20)
-wrongLabel.Position = UDim2.new(0, 0, 0.88, 0)
-wrongLabel.BackgroundTransparency = 1
-wrongLabel.Text = ""
-wrongLabel.TextColor3 = Color3.fromRGB(255, 60, 60)
-wrongLabel.TextSize = 12
-wrongLabel.Font = Enum.Font.SourceSansBold
-wrongLabel.Parent = keyFrame
+local ugcLink = Instance.new("TextLabel")
+ugcLink.Size = UDim2.new(0.9, 0, 0, 45)
+ugcLink.Position = UDim2.new(0.05, 0, 0, 100)
+ugcLink.BackgroundColor3 = Color3.fromRGB(255, 200, 40)
+ugcLink.BackgroundTransparency = 0.25
+ugcLink.BorderSizePixel = 0
+ugcLink.Text = UGC_LINK
+ugcLink.TextColor3 = Color3.fromRGB(40, 25, 0)
+ugcLink.TextSize = 13
+ugcLink.TextWrapped = true
+ugcLink.Font = Enum.Font.SourceSansBold
+ugcLink.Selectable = true   -- mozna zaznaczyc i skopiowac
+ugcLink.Parent = keyFrame
 
 -- Forward declarations (so showGameSelect can use the menu)
 local startMainScript
@@ -805,7 +809,7 @@ wmLabel.Font = Enum.Font.SourceSansBold
 wmLabel.TextSize = 14
 wmLabel.TextColor3 = Color3.fromRGB(210, 150, 255)
 wmLabel.TextXAlignment = Enum.TextXAlignment.Left
-wmLabel.Text = " LiptonHub "
+wmLabel.Text = " LiptonHub r5 "
 wmLabel.Parent = wmFrame
 
 -- FPS: we count RenderStepped frames; ping: Stats.Network "Data Ping" (ms).
@@ -828,7 +832,7 @@ runService.RenderStepped:Connect(function()
         wmFps = math.floor(wmFrames / (now - wmLast) + 0.5)
         wmFrames = 0
         wmLast = now
-        wmLabel.Text = " LiptonHub   |  FPS: " .. wmFps .. "  |  Ping: " .. wmPingMs() .. " ms"
+        wmLabel.Text = " LiptonHub r5  |  FPS: " .. wmFps .. "  |  Ping: " .. wmPingMs() .. " ms"
     end
 end)
 
@@ -931,7 +935,7 @@ function startMainScript()
     -- catches up, so the farm must keep its distance. Slider 1-50 studs.
     local farmUi = {}   -- distance slider (one table instead of 3 locals:
     local farmLegit = false       -- "walking" farm mode (engine) vs. the default flight (CFrame)
-    local farmSpeedLimit = 100     -- effective flight speed (the farm slows down when the server rolls movement back)
+    local _farmSpeedLimit = 100     -- effective flight speed (the farm slows down when the server rolls movement back)
                         -- Lua has a 200 register limit per chunk)
 
     -- AUTO FARM: thresholds (described in the AUTOFARM v4 section)
@@ -1266,10 +1270,128 @@ function startMainScript()
     end
 
     local b1 = createButton("Fly: OFF", 1, "Movement")
-    local b2 = createButton("Noclip: OFF", 2, "Movement")
-    local b3 = createButton("Speed Hack: OFF", 3, "Movement")
+    local b2 = createButton("Noclip: OFF", 4, "Movement")
+    local b3 = createButton("Speed Hack: OFF", 5, "Movement")
     local b4 = createButton("ESP: OFF", 4, "Visuals")
     local b5 = createButton("Auto TP Gun: OFF", 5, "Combat")
+    tp.ui.bCoinEsp = createButton("Coin ESP: OFF", 5, "Visuals")
+
+    ------------------------------------------------------------
+    -- CANDY SPOOF (TYLKO CLIENT) - CALY MODUL TUTAJ (UI + handlery +
+    -- petla) i SAMO NAPRAWIAJACY SIE: gdyby przycisk zniknal (blud builda,
+    -- wczesniejszy paste, sprzatanie gry), watchdog tworzy go od nowa.
+    -- Wpisisz liczbe = licznik cukierkow w evencie/pasie pokazuje dokladnie
+    -- tyle (format "4,575"). Tylko wyswietlanie na Twoim ekranie.
+    ------------------------------------------------------------
+    tp.candySpoof = { on = false, at = 0, value = 4575 }
+
+    -- "4575" -> "4,575" (tak jak licznik w evencie)
+    tp.candyText = function(n)
+        local s = tostring(math.floor(n)):reverse():gsub("(%d%d%d)", "%1,"):reverse()
+        return (s:gsub("^,", ""))
+    end
+
+    tp.candySpoofUI = function()
+        -- juz jest na ekranie = nic nie robimy (watchdog w petli ponizej)
+        if tp.ui.candySpoofBtn and tp.ui.candySpoofBtn.Parent
+            and tp.ui.candyBox and tp.ui.candyBox.Parent then return end
+        local box = Instance.new("TextBox")
+        box.Size = UDim2.new(0.95, 0, 0, 26)
+        box.BackgroundColor3 = themes[currentTheme].ButtonBg
+        box.BorderSizePixel = 0
+        box.Text = "4575"
+        box.PlaceholderText = "Ile cukierkow?"
+        box.PlaceholderColor3 = themes[currentTheme].TextCol
+        box.TextColor3 = Color3.fromRGB(240, 240, 240)
+        box.Font = Enum.Font.Gotham
+        box.TextSize = 12
+        box.TextXAlignment = Enum.TextXAlignment.Left
+        box.ClearTextOnFocus = false
+        box.LayoutOrder = 5
+        box.ZIndex = 3
+        box.Parent = pages["Exploits"]
+        do
+            local pad = Instance.new("UIPadding")
+            pad.PaddingLeft = UDim.new(0, 8)
+            pad.Parent = box
+        end
+        local btn = createButton("Candy Spoof: OFF", 6, "Exploits")
+        tp.ui.candyBox = box
+        tp.ui.candySpoofBtn = btn
+        btn.MouseButton1Click:Connect(function()
+            -- nawiasy wokol gsub: gsub zwraca (tekst, liczba) i bez nich
+            -- tonumber dostawalo 2 argumenty = blad "base out of range"
+            local n = tonumber(((tp.ui.candyBox.Text or ""):gsub("[^%d]", "")))
+            if n then tp.candySpoof.value = n end
+            tp.candySpoof.on = not tp.candySpoof.on
+            btn.Text = tp.candySpoof.on and "Candy Spoof: ON" or "Candy Spoof: OFF"
+            btn.BackgroundColor3 = tp.candySpoof.on and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
+            tp.candySpoof.at = 0 -- podmiana od razu po wlaczeniu
+            if tp.updateCheats then tp.updateCheats() end
+        end)
+        print("[SzpontHub] r5: CandySpoof UI gotowe (Exploits)")
+    end
+    tp.candySpoofUI()
+
+    runService.Heartbeat:Connect(function()
+        if not isCurrentGen() then return end
+        -- WATCHDOG UI: gdyby przycisk/pole zniknely - tworzymy od nowa
+        if not (tp.ui.candySpoofBtn and tp.ui.candySpoofBtn.Parent
+                and tp.ui.candyBox and tp.ui.candyBox.Parent) then
+            pcall(tp.candySpoofUI)
+        end
+        if not tp.candySpoof.on then return end
+        local now = os.clock()
+        if now < tp.candySpoof.at then return end
+        tp.candySpoof.at = now + 0.5
+        local n = tp.candySpoof.value
+        local txt = tp.candyText(n)
+        pcall(function()
+            -- 1) lokalne wartosci: jak gra trzyma licznik w Value, GUI
+            --    przemalowuje sie samo
+            for _, v in ipairs(plr:GetDescendants()) do
+                if v:IsA("IntValue") or v:IsA("NumberValue") then
+                    local nm = v.Name:lower()
+                    if nm:find("cand") or nm:find("currenc") or nm:find("halloween")
+                        or nm:find("evt") or nm:find("token") then
+                        v.Value = n
+                    end
+                end
+            end
+            -- 2) podpisy w GUI. Dopasowanie PO NAZWIE (cand/currenc/halloween/
+            --    evt/token/point) w 3 poziomach rodzicow ALBO po KSZTALCIE
+            --    licznika waluty: cyfry z PRZECINKIEM obok ikony (ImageLabel)
+            --    w tym samym panelu. Same "28"/"29" z kart przepustki nie maja
+            --    przecinka = nie trafiamy w numery tierow.
+            local hits = 0
+            for _, d in ipairs(plr.PlayerGui:GetDescendants()) do
+                if d:IsA("TextLabel") or d:IsA("TextButton") then
+                    local t = d.Text
+                    if t and t:match("^%s*%d[%,%.%d]*%s*$") then
+                        local p1 = d.Parent
+                        local p2 = p1 and p1.Parent
+                        local chain = (d.Name .. " " .. (p1 and p1.Name or "")
+                            .. " " .. (p2 and p2.Name or "")):lower()
+                        local poNazwie = chain:find("cand") or chain:find("currenc")
+                            or chain:find("halloween") or chain:find("evt")
+                            or chain:find("token") or chain:find("point")
+                        local poPrzecinku = t:find(",", 1, true) and p1
+                            and p1:FindFirstChildOfClass("ImageLabel")
+                        if poNazwie or poPrzecinku then
+                            d.Text = txt
+                            hits = hits + 1
+                        end
+                    end
+                end
+            end
+            tp.candySpoof.hits = hits
+            if hits ~= (tp.candySpoof.hitsShown or -1) then
+                tp.candySpoof.hitsShown = hits
+                print("[SzpontHub] CandySpoof: podmienionych etykiet w GUI = " .. hits)
+            end
+        end)
+    end)
+    print("[SzpontHub] r5 UI: CandySpoof podlaczony")
 
     local sl1 = Instance.new("TextLabel")
     sl1.Size = UDim2.new(0.95, 0, 0, 12)
@@ -1278,7 +1400,7 @@ function startMainScript()
     sl1.TextSize = 11
     sl1.Font = Enum.Font.SourceSansBold
     sl1.Text = "Fly Speed: 60"
-    sl1.LayoutOrder = 6
+    sl1.LayoutOrder = 2
     sl1.ZIndex = 3
     sl1.Parent = pages["Movement"]
     table.insert(allLabels, sl1)
@@ -1290,7 +1412,7 @@ function startMainScript()
     sb1.BorderColor3 = themes[currentTheme].Primary
     sb1.Text = ""
     sb1.AutoButtonColor = false
-    sb1.LayoutOrder = 7
+    sb1.LayoutOrder = 3
     sb1.ZIndex = 3
     sb1.Parent = pages["Movement"]
     table.insert(allSliders, sb1)
@@ -1310,7 +1432,7 @@ function startMainScript()
     sl2.TextSize = 11
     sl2.Font = Enum.Font.SourceSansBold
     sl2.Text = "Walk Speed: 32"
-    sl2.LayoutOrder = 8
+    sl2.LayoutOrder = 6
     sl2.ZIndex = 3
     sl2.Parent = pages["Movement"]
     table.insert(allLabels, sl2)
@@ -1322,7 +1444,7 @@ function startMainScript()
     sb2.BorderColor3 = themes[currentTheme].Primary
     sb2.Text = ""
     sb2.AutoButtonColor = false
-    sb2.LayoutOrder = 9
+    sb2.LayoutOrder = 7
     sb2.ZIndex = 3
     sb2.Parent = pages["Movement"]
     table.insert(allSliders, sb2)
@@ -1336,7 +1458,7 @@ function startMainScript()
     table.insert(allFrames, sf2)
 
     local b6 = createButton("Triggerbot: OFF", 10, "Combat")
-    local b7 = createButton("Alt-Quit: OFF", 11, "Utility")
+    local b7 = createButton("Alt-Quit: OFF", 1, "Utility")
     local b8 = createButton("Spinbot: OFF", 12, "Combat")
 
     local sl3 = Instance.new("TextLabel")
@@ -1373,16 +1495,16 @@ function startMainScript()
 
     local b9 = createButton("Auto Kill All: OFF", 15, "Combat")
     local b10 = createButton("Auto Kill Murder: OFF", 16, "Combat")
-    local b11 = createButton("Target: NONE", 12, "Utility")
-    local b12 = createButton("Fling Target: OFF", 13, "Utility")
-    local b13 = createButton("Auto Farm Coins: OFF", 19, "Utility")
-    local bFarmLegit = createButton("Auto Farm Legit: OFF", 18, "Utility")
+    local b11 = createButton("Target: NONE", 2, "Utility")
+    local b12 = createButton("Fling Target: OFF", 3, "Utility")
+    local b13 = createButton("Auto Farm Coins: OFF", 11, "Utility")
+    local bFarmLegit = createButton("Auto Farm Legit: OFF", 10, "Utility")
     -- (Fling Murderer on a full bag is now part of Auto Farm - no separate button)
     -- ROLE-BASED FLINGS: the target changes on its own when the role changes - no need
     -- to pick someone from the player list every round. Independent of "Fling Target"
     -- (manual) and of "Fling Murderer (Full Bag)" (automatic after a full bag).
-    roleBtns.sheriff = createButton("Fling Sheriff: OFF", 16, "Utility")
-    roleBtns.murderer = createButton("Fling Murderer: OFF", 17, "Utility")
+    roleBtns.sheriff = createButton("Fling Sheriff: OFF", 8, "Utility")
+    roleBtns.murderer = createButton("Fling Murderer: OFF", 9, "Utility")
     roleBtns.sheriff.MouseButton1Click:Connect(function()
         roleFlags.sheriff = not roleFlags.sheriff
         roleBtns.sheriff.Text = roleFlags.sheriff and "Fling Sheriff: ON" or "Fling Sheriff: OFF"
@@ -1413,8 +1535,8 @@ function startMainScript()
         bFarmLegit.BackgroundColor3 = farmLegit and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
         updateActiveCheatsList()
     end)
-    local bAnnoyTarget = createButton("Annoy Target: NONE", 14, "Utility")
-    local bAnnoy = createButton("Annoy: OFF", 15, "Utility")
+    local bAnnoyTarget = createButton("Annoy Target: NONE", 4, "Utility")
+    local bAnnoy = createButton("Annoy: OFF", 5, "Utility")
 
     local sl4 = Instance.new("TextLabel")
     sl4.Size = UDim2.new(0.95, 0, 0, 12)
@@ -1423,7 +1545,7 @@ function startMainScript()
     sl4.TextSize = 11
     sl4.Font = Enum.Font.SourceSansBold
     sl4.Text = "Farm Speed: 17"
-    sl4.LayoutOrder = 20
+    sl4.LayoutOrder = 12
     sl4.ZIndex = 3
     sl4.Parent = pages["Utility"]
     table.insert(allLabels, sl4)
@@ -1435,7 +1557,7 @@ function startMainScript()
     sb4.BorderColor3 = themes[currentTheme].Primary
     sb4.Text = ""
     sb4.AutoButtonColor = false
-    sb4.LayoutOrder = 21
+    sb4.LayoutOrder = 13
     sb4.ZIndex = 3
     sb4.Parent = pages["Utility"]
     table.insert(allSliders, sb4)
@@ -1451,7 +1573,7 @@ function startMainScript()
     -- TP FARM: button + speed slider (Utility, right under the farm start).
     -- slider 20-250, start at 60 => rel = (60-20)/230 = 0.174
     -- everything goes into tp.ui (Lua 200 local register limit)
-    tp.ui.btn = createButton("TP Farm: OFF", 29, "Utility")
+    tp.ui.btn = createButton("TP Farm: OFF", 21, "Utility")
 
     tp.ui.lbl = Instance.new("TextLabel")
     tp.ui.lbl.Size = UDim2.new(0.95, 0, 0, 12)
@@ -1460,7 +1582,7 @@ function startMainScript()
     tp.ui.lbl.TextSize = 11
     tp.ui.lbl.Font = Enum.Font.SourceSansBold
     tp.ui.lbl.Text = "TP Time: 2.0s"
-    tp.ui.lbl.LayoutOrder = 30
+    tp.ui.lbl.LayoutOrder = 22
     tp.ui.lbl.ZIndex = 3
     tp.ui.lbl.Parent = pages["Utility"]
     table.insert(allLabels, tp.ui.lbl)
@@ -1472,7 +1594,7 @@ function startMainScript()
     tp.ui.bar.BorderColor3 = themes[currentTheme].Primary
     tp.ui.bar.Text = ""
     tp.ui.bar.AutoButtonColor = false
-    tp.ui.bar.LayoutOrder = 31
+    tp.ui.bar.LayoutOrder = 23
     tp.ui.bar.ZIndex = 3
     tp.ui.bar.Parent = pages["Utility"]
     table.insert(allSliders, tp.ui.bar)
@@ -1494,7 +1616,7 @@ function startMainScript()
     farmUi.lbl.TextSize = 11
     farmUi.lbl.Font = Enum.Font.SourceSansBold
     farmUi.lbl.Text = "Panic (murderer): 6"
-    farmUi.lbl.LayoutOrder = 32
+    farmUi.lbl.LayoutOrder = 14
     farmUi.lbl.ZIndex = 3
     farmUi.lbl.Parent = pages["Utility"]
     table.insert(allLabels, farmUi.lbl)
@@ -1506,7 +1628,7 @@ function startMainScript()
     farmUi.bar.BorderColor3 = themes[currentTheme].Primary
     farmUi.bar.Text = ""
     farmUi.bar.AutoButtonColor = false
-    farmUi.bar.LayoutOrder = 33
+    farmUi.bar.LayoutOrder = 15
     farmUi.bar.ZIndex = 3
     farmUi.bar.Parent = pages["Utility"]
     table.insert(allSliders, farmUi.bar)
@@ -1528,7 +1650,7 @@ function startMainScript()
     annoyUi.lbl.TextSize = 11
     annoyUi.lbl.Font = Enum.Font.SourceSansBold
     annoyUi.lbl.Text = "Annoy Speed: 10"
-    annoyUi.lbl.LayoutOrder = 34
+    annoyUi.lbl.LayoutOrder = 6
     annoyUi.lbl.ZIndex = 3
     annoyUi.lbl.Parent = pages["Utility"]
     table.insert(allLabels, annoyUi.lbl)
@@ -1540,7 +1662,7 @@ function startMainScript()
     annoyUi.bar.BorderColor3 = themes[currentTheme].Primary
     annoyUi.bar.Text = ""
     annoyUi.bar.AutoButtonColor = false
-    annoyUi.bar.LayoutOrder = 35
+    annoyUi.bar.LayoutOrder = 7
     annoyUi.bar.ZIndex = 3
     annoyUi.bar.Parent = pages["Utility"]
     table.insert(allSliders, annoyUi.bar)
@@ -1553,13 +1675,13 @@ function startMainScript()
     annoyUi.fill.Parent = annoyUi.bar
     table.insert(allFrames, annoyUi.fill)
 
-    local b14 = createButton("Anti-Fling: OFF", 22, "Utility")
+    local b14 = createButton("Anti-Fling: OFF", 17, "Utility")
     -- ANTI-VOID next to Anti-Fling (22), because both protect against "getting stuck"
     -- outside the map - except this one protects against DEATH by falling, not against pushing.
-    roleBtns.void = createButton("Anti-Void: OFF", 21, "Utility")
-    local b15 = createButton("Anti-AFK: OFF", 23, "Utility")
+    roleBtns.void = createButton("Anti-Void: OFF", 18, "Utility")
+    local b15 = createButton("Anti-AFK: OFF", 19, "Utility")
     local b16 = createButton("Fullbright: OFF", 24, "Visuals")
-    local bThemeToggle = createButton("Theme: Purple", 25, "Utility")
+    local bThemeToggle = createButton("Theme: Purple", 20, "Utility")
 
     local b17 = createButton("Hitbox Murderer: OFF", 26, "Combat")
 
@@ -1594,6 +1716,39 @@ function startMainScript()
     sf5.ZIndex = 4
     sf5.Parent = sb5
     table.insert(allFrames, sf5)
+
+    -- COIN HITBOX: powiększenie lokalnych hitboxów monet/cukierków (do 100x)
+    local slCoinHit = Instance.new("TextLabel")
+    slCoinHit.Size = UDim2.new(0.95, 0, 0, 12)
+    slCoinHit.BackgroundTransparency = 1
+    slCoinHit.TextColor3 = themes[currentTheme].TextCol
+    slCoinHit.TextSize = 11
+    slCoinHit.Font = Enum.Font.SourceSansBold
+    slCoinHit.Text = "Coin Hitbox: 1x"
+    slCoinHit.LayoutOrder = 24
+    slCoinHit.ZIndex = 3
+    slCoinHit.Parent = pages["Utility"]
+    table.insert(allLabels, slCoinHit)
+
+    local sbCoinHit = Instance.new("TextButton")
+    sbCoinHit.Size = UDim2.new(0.95, 0, 0, 10)
+    sbCoinHit.BackgroundColor3 = themes[currentTheme].Dark
+    sbCoinHit.BorderSizePixel = 1
+    sbCoinHit.BorderColor3 = themes[currentTheme].Primary
+    sbCoinHit.Text = ""
+    sbCoinHit.AutoButtonColor = false
+    sbCoinHit.LayoutOrder = 25
+    sbCoinHit.ZIndex = 3
+    sbCoinHit.Parent = pages["Utility"]
+    table.insert(allSliders, sbCoinHit)
+
+    local sfCoinHit = Instance.new("Frame")
+    sfCoinHit.Size = UDim2.new(0, 0, 1, 0)
+    sfCoinHit.BackgroundColor3 = themes[currentTheme].Primary
+    sfCoinHit.BorderSizePixel = 0
+    sfCoinHit.ZIndex = 4
+    sfCoinHit.Parent = sbCoinHit
+    table.insert(allFrames, sfCoinHit)
 
     -- AIMBOT (sheriff revolver): button + FOV slider + speed slider
     local bAim = createButton("Aimbot (Revolver): OFF", 29, "Combat")
@@ -1663,6 +1818,46 @@ function startMainScript()
     table.insert(allFrames, sfAimSpeed)
 
     ------------------------------------------------------------
+    -- SUWAK "PREDICTION GRACZA" (aimbot): o ile ms w przod celujemy w
+    -- poruszajacego sie morderce (0 = tam gdzie jest, 300 = mocne wyprzedzenie).
+    -- Caly stan w tabeli aimUi = jeden local zamiast czterech (limit 200
+    -- rejestrów Luau w funkcji budujacej).
+    ------------------------------------------------------------
+    local aimUi = { pred = 60, drag = false }
+
+    aimUi.lbl = Instance.new("TextLabel")
+    aimUi.lbl.Size = UDim2.new(0.95, 0, 0, 12)
+    aimUi.lbl.BackgroundTransparency = 1
+    aimUi.lbl.TextColor3 = themes[currentTheme].TextCol
+    aimUi.lbl.TextSize = 11
+    aimUi.lbl.Font = Enum.Font.SourceSansBold
+    aimUi.lbl.Text = "Prediction gracza: 60 ms"
+    aimUi.lbl.LayoutOrder = 34
+    aimUi.lbl.ZIndex = 3
+    aimUi.lbl.Parent = pages["Combat"]
+    table.insert(allLabels, aimUi.lbl)
+
+    aimUi.bar = Instance.new("TextButton")
+    aimUi.bar.Size = UDim2.new(0.95, 0, 0, 10)
+    aimUi.bar.BackgroundColor3 = themes[currentTheme].Dark
+    aimUi.bar.BorderSizePixel = 1
+    aimUi.bar.BorderColor3 = themes[currentTheme].Primary
+    aimUi.bar.Text = ""
+    aimUi.bar.AutoButtonColor = false
+    aimUi.bar.LayoutOrder = 35
+    aimUi.bar.ZIndex = 3
+    aimUi.bar.Parent = pages["Combat"]
+    table.insert(allSliders, aimUi.bar)
+
+    aimUi.fill = Instance.new("Frame")
+    aimUi.fill.Size = UDim2.new(0.2, 0, 1, 0) -- 60 ms z zakresu 0-300
+    aimUi.fill.BackgroundColor3 = themes[currentTheme].Primary
+    aimUi.fill.BorderSizePixel = 0
+    aimUi.fill.ZIndex = 4
+    aimUi.fill.Parent = aimUi.bar
+    table.insert(allFrames, aimUi.fill)
+
+    ------------------------------------------------------------
     -- "SKINS" TAB - WEAPON AND SKIN DATABASE (100% CLIENT-SIDE)
     -- We take everything straight from the game database: ReplicatedStorage.Database.Sync.Weapons
     --   (1004 entries: 632 knives + 356 guns). Key *_G_* / *_K_* = SKIN,
@@ -1721,7 +1916,9 @@ function startMainScript()
 
     local function rarityColor(name)
         local c = name and rarityColors[name]
-        if typeof(c) == "Color3" then return c end
+        -- tostring() wokol typeof: sama forma "typeof(x) == 'Color3'" to dla
+        -- analizatora refinacja NAZWY TYPU = zbedne ostrzezenie UnknownType
+        if tostring(typeof(c)) == "Color3" then return c end
         if type(c) == "string" then
             local r, g, b = c:match("(%d+%.?%d*),%s*(%d+%.?%d*),%s*(%d+%.?%d*)")
             if r then
@@ -2263,11 +2460,11 @@ function startMainScript()
             if other ~= plr then
                 local oc = other.Character
                 local ot = oc and oc:FindFirstChildOfClass("Tool")
-                if isSlot(ot, pat2) then template = ot break end
+                if isSlot(ot, pat2) then template = ot; break end
                 local ob = other:FindFirstChildOfClass("Backpack")
                 if ob then
                     for _, t in ipairs(ob:GetChildren()) do
-                        if isSlot(t, pat2) then template = t break end
+                        if isSlot(t, pat2) then template = t; break end
                     end
                 end
                 if template then break end
@@ -2517,7 +2714,7 @@ function startMainScript()
             -- adoption = also register it to recreate after respawn
             local found = false
             for _, e in ipairs(szpInv.spawned) do
-                if e.key == entry.key then found = true break end
+                if e.key == entry.key then found = true; break end
             end
             if not found then
                 table.insert(szpInv.spawned, {
@@ -2547,7 +2744,7 @@ function startMainScript()
         szpInv.wireFrame(fr, entry)   -- click a tile = we pick it up
         local found = false
         for _, e in ipairs(szpInv.spawned) do
-            if e.key == entry.key then found = true break end
+            if e.key == entry.key then found = true; break end
         end
         if not found then
             -- id (mesh asset) and slot must survive a respawn, because without them
@@ -2829,9 +3026,12 @@ function startMainScript()
     local tpDist = 10
 
     -- CAMERA NOCLIP (Visuals): kamera ma przechodzic przez sciany "jak w maslo",
-    -- zamiast obijac sie o nie i skracac dystans. Stan w jednej tabeli (limit
-    -- 200 rejestrow wciaz blisko): .on = opcja, .dist = pelny dystans zoomu,
-    -- .btn = przycisk, .params = raycast (postac + kamera wykluczone).
+    -- zamiast obijac sie o nie i skracac dystans. Implementacja: BindToRenderStep
+    -- PO grze (Camera + 1) = nadpisujemy pozycje kamery po Popperze gry i
+    -- ustawiamy ja NA PELNYM dystansie za glowa BEZ raycastu - czyli prosto
+    -- przez sciany/sufity. Rotacja zostaje z gry (myszka dziala normalnie).
+    -- Stan w jednej tabeli (limit 200 rejestrow wciaz blisko):
+    --   .on = opcja, .dist = dystans kamery od glowy.
     local camUi = { on = false, dist = 12 }
 
     -- INSTANCE TEARDOWN: if the script runs a second time, the new
@@ -2869,6 +3069,12 @@ function startMainScript()
                 thirdPerson = false
                 mm2Ppm = false
                 if tp then tp.on = false end
+                camUi.on = false   -- petla kamery samoodwiaze sie przy nastepnej klatce
+                camUi.zoomOn = false
+                if camUi.zoomSaved then
+                    pcall(function() plr.CameraMaxZoomDistance = camUi.zoomSaved end)
+                    camUi.zoomSaved = nil
+                end
                 -- 2) world state (WalkSpeed, collisions, rotation, lighting, ESP)
                 restoreWorldState()
                 -- 3) old GUI disappears
@@ -2903,6 +3109,8 @@ function startMainScript()
         if roleFlags.void then table.insert(activeList, "Anti-Void") end
         if tp.on then table.insert(activeList, " TP Farm (" .. string.format("%.1f", tp.sec) .. "s)") end
         if tp.candy.on then table.insert(activeList, " Candy Vacuum") end
+        if camUi.zoomOn then table.insert(activeList, " Infinite Zoom") end
+        if tp.coinEsp then table.insert(activeList, " Coin ESP (zloto)") end
         if antiFling then table.insert(activeList, " Anti-Fling") end
         if antiAfk then table.insert(activeList, " Anti-AFK") end
         if fullbrightEnabled then table.insert(activeList, " Fullbright") end
@@ -2933,6 +3141,11 @@ function startMainScript()
 
         cheatsScroll.CanvasSize = UDim2.new(0, 0, 0, #activeList * 30)
     end
+    -- bTP (przycisk Third Person) MUSI byc zadeklarowany PRZED cfg.refresh,
+    -- ktory go odswieza: bez tego mark(bTP, ...) w refreshu widzialo GLOBALA
+    -- = nil i przycisk nigdy nie odswiezal sie po wczytaniu configu
+    local bTP
+
     local cfg = {
         file = "SzpontHubConfig.json",
         http = game:GetService("HttpService"),
@@ -2951,6 +3164,7 @@ function startMainScript()
         mark(b2, noclip, "Noclip: ON", "Noclip: OFF")
         mark(b3, speedHack, "Speed Hack: ON", "Speed Hack: OFF")
         mark(b4, espEnabled, "ESP: ON", "ESP: OFF")
+        mark(tp.ui.bCoinEsp, tp.coinEsp, "Coin ESP: ON", "Coin ESP: OFF")
         mark(b5, autoGunTP, "Auto TP Gun: ON", "Auto TP Gun: OFF")
         mark(b6, triggerbot, "Triggerbot: ON", "Triggerbot: OFF")
         mark(b7, altQuitEnabled, "Alt-Quit: ON", "Alt-Quit: OFF")
@@ -2977,6 +3191,10 @@ function startMainScript()
         if sl5 then sl5.Text = "Hitbox Size: " .. hitboxSizeVal end
         if slAimFov then slAimFov.Text = "Aimbot FOV: " .. aimbotFov end
         if slAimSpeed then slAimSpeed.Text = "Aimbot Speed: " .. aimbotSpeed end
+        if aimUi and aimUi.lbl then
+            aimUi.lbl.Text = "Prediction gracza: " .. math.floor(aimUi.pred) .. " ms"
+            aimUi.fill.Size = UDim2.new(math.clamp(aimUi.pred / 300, 0, 1), 0, 1, 0)
+        end
         if tp.ui.lbl then tp.ui.lbl.Text = "TP Time: " .. string.format("%.1f", tp.sec) .. "s" end
         if farmUi.lbl then farmUi.lbl.Text = "Panic (murderer): " .. farmPanicDist end
         if annoyUi.lbl then annoyUi.lbl.Text = "Annoy Speed: " .. annoyUi.speed end
@@ -2990,6 +3208,7 @@ function startMainScript()
         farmSpeed = data.farmSpeed or farmSpeed
         farmLegit = data.farmLegit == true
         espEnabled = data.espEnabled == true
+        tp.coinEsp = data.coinEsp == true
         antiAfk = data.antiAfk == true
         -- ANTI-FLING = OCHRONA, wiec brak pola w STARYM configie NIE moze jej
         -- wylaczac. Kiedys configi nie mialy "antiFling" i ladowanie takiego
@@ -3018,6 +3237,7 @@ function startMainScript()
         aimbotEnabled = data.aimbotEnabled == true
         aimbotFov = data.aimbotFov or aimbotFov
         aimbotSpeed = data.aimbotSpeed or aimbotSpeed
+        if data.aimPred then aimUi.pred = data.aimPred end
         thirdPerson = data.thirdPerson == true
         tpDist = data.tpDist or tpDist
         farmPanicDist = data.farmPanicDist or farmPanicDist
@@ -3037,7 +3257,7 @@ function startMainScript()
     function cfg.collect()
         return {
             autoFarmCoins = autoFarmCoins, farmSpeed = farmSpeed, farmLegit = farmLegit,
-            espEnabled = espEnabled, antiAfk = antiAfk, fullbrightEnabled = fullbrightEnabled,
+            espEnabled = espEnabled, coinEsp = tp.coinEsp, antiAfk = antiAfk, fullbrightEnabled = fullbrightEnabled,
             antiFling = antiFling,
             flying = flying, noclip = noclip, speedHack = speedHack, walkSpeedVal = walkSpeedVal,
             spinbotEnabled = spinbotEnabled, spinSpeedVal = spinSpeedVal, triggerbot = triggerbot,
@@ -3047,6 +3267,7 @@ function startMainScript()
             annoySpeed = annoyUi.speed,
             hitboxExpander = hitboxExpander, hitboxSizeVal = hitboxSizeVal,
             aimbotEnabled = aimbotEnabled, aimbotFov = aimbotFov, aimbotSpeed = aimbotSpeed,
+            aimPred = aimUi.pred,
             thirdPerson = thirdPerson, tpDist = tpDist, farmPanicDist = farmPanicDist,
             tpOn = tp.on, tpSec = tp.sec,
             flingMurderFull = flingMurderFull,
@@ -3129,7 +3350,9 @@ function startMainScript()
         return ok, err
     end
 
-    -- LIST OF SAVED CONFIGS (click a name = load, "x" = delete)
+    -- LIST OF SAVED CONFIGS (click a name = load, "S" = overwrite with the
+    -- current settings, "x" = delete). "S" is ONLY on the player's own configs -
+    -- the built-in Default/AutoFarm buttons manage themselves.
     function cfg.refreshList()
         if not cfg.list then return end
         for _, c in ipairs(cfg.list:GetChildren()) do
@@ -3145,7 +3368,7 @@ function startMainScript()
             row.Parent = cfg.list
             local loadBtn = Instance.new("TextButton")
             loadBtn.Name = "Load"
-            loadBtn.Size = UDim2.new(1, -30, 1, 0)
+            loadBtn.Size = UDim2.new(1, -56, 1, 0)
             loadBtn.BackgroundColor3 = themes[currentTheme].ButtonBg
             loadBtn.BackgroundTransparency = 0
             loadBtn.BorderSizePixel = 0
@@ -3156,6 +3379,22 @@ function startMainScript()
             loadBtn.TextXAlignment = Enum.TextXAlignment.Left
             loadBtn.ZIndex = 4
             loadBtn.Parent = row
+            -- "S" = zapisz BIEZACE ustawienia POD ta nazwa (nadpisuje wpis gracza).
+            -- Tylko na wlasnych configach - wbudowane Default/AutoFarm same
+            -- zarzadzaja swoim stanem.
+            local saveBtn = Instance.new("TextButton")
+            saveBtn.Name = "Save"
+            saveBtn.Size = UDim2.new(0, 24, 1, 0)
+            saveBtn.Position = UDim2.new(1, -52, 0, 0)
+            saveBtn.BackgroundColor3 = themes[currentTheme].ButtonBg
+            saveBtn.BackgroundTransparency = 0
+            saveBtn.BorderSizePixel = 0
+            saveBtn.Text = "S"
+            saveBtn.TextColor3 = Color3.fromRGB(120, 220, 140)
+            saveBtn.Font = Enum.Font.GothamBold
+            saveBtn.TextSize = 12
+            saveBtn.ZIndex = 4
+            saveBtn.Parent = row
             local delBtn = Instance.new("TextButton")
             delBtn.Name = "Del"
             delBtn.Size = UDim2.new(0, 24, 1, 0)
@@ -3172,6 +3411,10 @@ function startMainScript()
             loadBtn.MouseButton1Click:Connect(function()
                 cfg.apply(entry.data)
                 cfg.info.Text = "Loaded config: " .. entry.name
+            end)
+            saveBtn.MouseButton1Click:Connect(function()
+                cfg.saveNamed(entry.name)   -- ten sam numer = nadpisanie wpisu
+                cfg.info.Text = "Config saved: " .. entry.name
             end)
             delBtn.MouseButton1Click:Connect(function()
                 cfg.delete(entry.name)
@@ -3223,7 +3466,7 @@ function startMainScript()
     -- click on the tab = switch to the Configs page (without this the button
     -- looked like a tab but did nothing)
     tbCfg.MouseButton1Click:Connect(function()
-    local cfgPrevTab = activeTab  -- we return to the previous tab after building the Configs page
+    local _cfgPrevTab = activeTab  -- we return to the previous tab after building the Configs page
         selectTab("Configs")
     end)
     selectTab("Configs")
@@ -3401,7 +3644,7 @@ function startMainScript()
         end
         cfg.refreshList()
     end
-    selectTab(cfgPrevTab)
+    selectTab(_cfgPrevTab)
 
     local playerListFrame = Instance.new("ScrollingFrame")
     playerListFrame.Size = UDim2.new(0.9, 0, 0.75, 0)
@@ -3788,6 +4031,7 @@ function startMainScript()
     local dragging8 = false
     local dragging9 = false   -- Panic slider
     local dragging10 = false  -- Annoy Speed slider
+    local dragging11 = false  -- Coin Hitbox slider
 
     sb1.MouseButton1Down:Connect(function() dragging1 = true end)
     sb2.MouseButton1Down:Connect(function() dragging2 = true end)
@@ -3799,6 +4043,8 @@ function startMainScript()
     tp.ui.bar.MouseButton1Down:Connect(function() dragging8 = true end)
     farmUi.bar.MouseButton1Down:Connect(function() dragging9 = true end)
     annoyUi.bar.MouseButton1Down:Connect(function() dragging10 = true end)
+    sbCoinHit.MouseButton1Down:Connect(function() dragging11 = true end)
+    aimUi.bar.MouseButton1Down:Connect(function() aimUi.drag = true end)
 
     uis.InputEnded:Connect(function(i)
         if not isCurrentGen() then return end
@@ -3808,6 +4054,8 @@ function startMainScript()
             dragging8 = false
             dragging9 = false
             dragging10 = false
+            dragging11 = false
+            aimUi.drag = false
         end
     end)
 
@@ -3881,6 +4129,18 @@ function startMainScript()
                 annoyUi.fill.Size = UDim2.new(rel, 0, 1, 0)
                 annoyUi.speed = math.floor(2 + rel * 38)
                 annoyUi.lbl.Text = "Annoy Speed: " .. annoyUi.speed
+            elseif dragging11 then
+                -- coin hitbox: 1x-100x (im większy, tym z daleka łapie dotyk)
+                local rel = math.clamp((i.Position.X - sbCoinHit.AbsolutePosition.X) / sbCoinHit.AbsoluteSize.X, 0, 1)
+                sfCoinHit.Size = UDim2.new(rel, 0, 1, 0)
+                tp.coinHit = math.max(1, math.floor(0.5 + rel * 99.5))
+                slCoinHit.Text = "Coin Hitbox: " .. tp.coinHit .. "x"
+            elseif aimUi.drag then
+                -- prediction gracza: 0-300 ms wyprzedzenia celownika
+                local rel = math.clamp((i.Position.X - aimUi.bar.AbsolutePosition.X) / aimUi.bar.AbsoluteSize.X, 0, 1)
+                aimUi.fill.Size = UDim2.new(rel, 0, 1, 0)
+                aimUi.pred = math.floor(0.5 + rel * 300)
+                aimUi.lbl.Text = "Prediction gracza: " .. aimUi.pred .. " ms"
             end
         end
     end)
@@ -3958,7 +4218,13 @@ function startMainScript()
             if not flying and not flingTargetEnabled then
                 local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
                 if hrp then
-                    if hrp.Velocity.Magnitude > 100 then hrp.Velocity = Vector3.new(0, 0, 0) end
+                    -- WYJATKI: TP Farm chodzi (tp.walking) ALBO farma leci
+                    -- BYPASSEM (tp.flyAt = przed chwila) - wtedy predkosc jest
+                    -- NASZA i zerowanie ja mrozi ("rotatuje i nie rusza"). Obroty
+                    -- zerujemy zawsze = anty-fling lapie wirujace fingle.
+                    if not tp.walking and (os.clock() - (tp.flyAt or 0)) > 0.35 then
+                        if hrp.Velocity.Magnitude > 100 then hrp.Velocity = Vector3.new(0, 0, 0) end
+                    end
                     if hrp.RotVelocity.Magnitude > 100 then hrp.RotVelocity = Vector3.new(0, 0, 0) end
                 end
             end
@@ -3977,7 +4243,7 @@ function startMainScript()
     local tpBindErr = ""
     local vmCache = {}
     local bodyCache = {}
-    local bTP = createButton("Third Person: OFF", 25, "Visuals")
+    bTP = createButton("Third Person: OFF", 25, "Visuals")
 
     local slTP = Instance.new("TextLabel")
     slTP.Size = UDim2.new(0.95, 0, 0, 12)
@@ -4010,6 +4276,138 @@ function startMainScript()
     sfTP.ZIndex = 4
     sfTP.Parent = sbTP
     table.insert(allFrames, sfTP)
+
+    -- [USUNIETE] CAMERA NOCLIP: przycisk + petla co klatke przypinaly kamere
+    -- na sztywnym dystansie (camUi.dist) za glowa i NADPISYWALY zoom gry =
+    -- kolkalo sie w kolko przy glowie i "nie mozna bylo scrollowac". To byla
+    -- przyczyna - usunieta. Zostaje auto-follow (nizej) ktory lapie kamere
+    -- TYLKO gdy faktycznie sie zepsuje (postac poza ekranem / lot farmy).
+
+    -- INFINITE ZOOM: zdjecie limitu oddalania (CameraMaxZoomDistance) - scroll
+    -- oddala tak daleko, jak sie chce. Dziala na ZWYKLEJ kamerze; gry czesto
+    -- przywracaja limit (respawn/skrypty), wiec pilnujemy go co sekunde.
+    local bInfZoom = createButton("Infinite Zoom: OFF", 29, "Visuals")
+
+    bInfZoom.MouseButton1Click:Connect(function()
+        camUi.zoomOn = not camUi.zoomOn
+        bInfZoom.Text = camUi.zoomOn and "Infinite Zoom: ON" or "Infinite Zoom: OFF"
+        bInfZoom.BackgroundColor3 = camUi.zoomOn and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
+        updateActiveCheatsList()
+        pcall(function()
+            if camUi.zoomOn then
+                -- zapamietujemy ORYGINALNY limit, ale NIGDY 100000: po starym
+                -- odpaleniu (albo wywaleniu skryptu bez przywracania) limit mogl
+                -- zostac na 100000 i zapis takiej wartosci = "infinite zoom dziala
+                -- nawet po wylaczeniu opcji"
+                local cur = plr.CameraMaxZoomDistance
+                camUi.zoomSaved = (cur < 100000) and cur or nil
+                plr.CameraMaxZoomDistance = 100000
+            else
+                plr.CameraMaxZoomDistance = camUi.zoomSaved or 128
+                camUi.zoomSaved = nil
+            end
+        end)
+    end)
+
+    task.spawn(function()
+        while true do
+            if not isCurrentGen() then return end
+            task.wait(1)
+            pcall(function()
+                if camUi.zoomOn then
+                    if plr.CameraMaxZoomDistance < 100000 then plr.CameraMaxZoomDistance = 100000 end
+                elseif plr.CameraMaxZoomDistance >= 100000 then
+                    -- SAMONAPRAWA: >= 100000 to NASZA wartosc zostawiona przez
+                    -- kiedys (stare odpalenie/unload) - przy WYLACZONEJ opcji
+                    -- przywracamy normalny limit
+                    plr.CameraMaxZoomDistance = camUi.zoomSaved or 128
+                end
+            end)
+        end
+    end)
+
+    -- SCROLL: kolko zmienia dystans przypiecia kamery (6-2000 studow).
+    -- Skok skokowo-proportjonalny (min 4 study na klikniecie): stary mnoznik
+    -- 1.15x od malych wartosci dawal ~1 studa na zebatke = "nie moge
+    -- scrollowac". Minimum 6: przy mniejszym kamera wchodzila W postac.
+    uis.InputChanged:Connect(function(inp)
+        if thirdPerson then return end
+        if inp.UserInputType == Enum.UserInputType.MouseWheel then
+            local krok = math.max(4, camUi.dist * 0.35)
+            camUi.dist = math.clamp(camUi.dist + ((inp.Position.Z > 0) and krok or -krok), 6, 2000)
+        end
+    end)
+
+    -- CAMERA FOLLOW (auto): dwa problemy uzytkownika "kamera zostaje na
+    -- odludziu, nie wiem co sie dzieje":
+    -- (1) TELEPORTY postaci (farma, flingi, teleporty gry) przesuwaja postac
+    --     o dziesiatki studow na klatke, a kamera gry zostaje z tylu ->
+    --     przesuwamy ja o TEN SAM wektor (obrot i zoom nietkniete).
+    -- (2) gdy farma leci postacia POD podloga (PlatformStand), popper gry
+    --     wciska kamere w geometrie = ekran pokazuje srodek sciany ->
+    --     trzymamy ja na pelnym dystansie za glowa, przez geometrie
+    --     (dokladnie jak Camera Noclip, ale automatycznie na czas lotu).
+    camUi.followLast = nil
+    runService.RenderStepped:Connect(function()
+        if not isCurrentGen() then return end
+        local ch = plr.Character
+        local head = ch and (ch:FindFirstChild("Head") or ch:FindFirstChild("HumanoidRootPart"))
+        if not head then camUi.followLast = nil; return end
+        local cam = workspace.CurrentCamera
+        if not cam then return end
+        local pos = head.Position
+        local hum = ch:FindFirstChildOfClass("Humanoid")
+        local cf = cam.CFrame
+        local dCam = (cf.Position - pos).Magnitude
+        if not thirdPerson and not camUi.on and (not hum or hum.Health > 0) then
+            -- (3) WATCHDOG "postaci nie widac": kamera potrafi wpasc w taki stan
+            --     (pitch w niebo / zostac z tylu / wypadnac z postaci), ze postac
+            --     jest POZA ekranem i sam gracz nie moze jej znalesc ("nie ma co
+            --     z tym zrobic"). Co klatke sprawdzamy, czy glowa jest NA EKRANIE;
+            --     jak nie - przepinamy kamere za postacia: yaw gracza zostaje,
+            --     pitch celuje w postac. First-person pomijamy (kamera przy glowie).
+            local vs = cam.ViewportSize
+            local sp = cam:WorldToScreenPoint(pos)
+            local poza = sp.Z < 0 or sp.X < -60 or sp.Y < -60
+                or sp.X > vs.X + 60 or sp.Y > vs.Y + 60
+            if poza and dCam > 3 then
+                if hum and cam.CameraSubject ~= hum then cam.CameraSubject = hum end
+                local lookW = cf.LookVector
+                local flat = Vector3.new(lookW.X, 0, lookW.Z)
+                if flat.Magnitude < 0.05 then flat = Vector3.new(0, 0, -1) end
+                local cel = pos + Vector3.new(0, 1.5, 0)
+                cam.CFrame = CFrame.lookAt(cel - flat.Unit * math.max(camUi.dist, 8), cel)
+            elseif hum and hum.PlatformStand then
+                -- (2a) farma prowadzi postac (lot/poke/nurkowanie) - przypinamy
+                --      kamere na swoim dystansie za glowa, przez geometrie (bez
+                --      poppera gry, ktory ja wklejal w sufity). Glowa zawsze na
+                --      srodku ekranu = widac postac.
+                --      Dystans MINIMUM 6: przy mniejszym kamera stawala W glowie
+                --      i ekran pokazywal puste niebo zamiast postaci.
+                --      STARY warunek "(2b) dCam > dist + 40" USUNIETY: lapal
+                --      ZWYKLY zoom-out uzytkownika (Infinite Zoom) i co klatke
+                --      ciagnal kamere z powrotem na 12 studow = "za blisko
+                --      postaci i nie moge scrollowac". Od zepsuc kamery jest
+                --      watchdog (3) wyzej.
+                local look = cf.LookVector
+                cam.CFrame = CFrame.new(pos - look * math.max(camUi.dist, 6)) * (cf - cf.Position)
+            elseif camUi.followLast then
+                local d = pos - camUi.followLast
+                if d.Magnitude > 30 then
+                    -- teleport: kamera jedzie z postacia tym samym wektorem
+                    cam.CFrame = cam.CFrame + d
+                    cam.Focus = cam.Focus + d
+                end
+            end
+        elseif camUi.followLast then
+            local d = pos - camUi.followLast
+            if d.Magnitude > 30 then
+                cam.CFrame = cam.CFrame + d
+                cam.Focus = cam.Focus + d
+            end
+        end
+        camUi.followLast = pos
+    end)
 
     -- FINAL PAINT: only now do all the GUI elements exist
     -- (the Third Person slider was just created)  modernize() applies its
@@ -4193,15 +4591,55 @@ function startMainScript()
     if not okB then tpBindErr = tostring(errB):sub(1, 30) end
     runService.RenderStepped:Connect(tpApply)
 
+    -- TYP BRONI: nazwa narzedzia to CZESTO nazwa skina ("Frostbite",
+    -- "Prismatic") = bez "knife"/"gun" w nazwie i stary getRole NIGDY nie
+    -- rozpoznawal mordercy/sheriffa = aimbot nie mial celu i "nie dzialal".
+    -- Teraz: nazwa ALBO baza broni gry (Database.Sync.Weapons[key].ItemType).
+    -- Proba wczytania bazy max co 5 s (moze nie byc gotowa przy starcie),
+    -- FindFirstChild zamiast WaitForChild = zero yieldow w srodku petli.
+    -- Stan w tabeli tp (NIE w localach): funkcja budujaca wisi na limicie
+    -- rejestrow Luau i kazdy nowy local wywala kompilacje calego pliku
+    -- (w Potassium = starszy Luau z limitem 200 = skrip w ogole sie nie odpala).
+    tp.wpn = { set = nil, tryAt = 0 }
+    tp.toolType = function(tool)
+        if not tool then return nil end
+        local n = tool.Name:lower()
+        if n:find("knife") or n:find("blade") then return "Knife" end
+        if n:find("gun") or n:find("revolver") or n:find("pistol") then return "Gun" end
+        if not tp.wpn.set and tick() > tp.wpn.tryAt then
+            tp.wpn.tryAt = tick() + 5
+            pcall(function()
+                local dbRoot = game:GetService("ReplicatedStorage"):FindFirstChild("Database")
+                local syncM = dbRoot and dbRoot:FindFirstChild("Sync")
+                if syncM then
+                    local Sync = require(syncM)
+                    local db = type(Sync) == "table" and (Sync.Weapons or Sync.Item) or nil
+                    if type(db) == "table" then
+                        local set = {}
+                        for k, v in pairs(db) do
+                            if type(v) == "table" and (v.ItemType == "Gun" or v.ItemType == "Knife") then
+                                local kind = (v.ItemType == "Gun") and "Gun" or "Knife"
+                                set[tostring(k):lower()] = kind
+                                if v.ItemName then set[tostring(v.ItemName):lower()] = kind end
+                            end
+                        end
+                        tp.wpn.set = set
+                    end
+                end
+            end)
+        end
+        return tp.wpn.set and tp.wpn.set[n] or nil
+    end
+
     local function getRole(player)
         if not player or not player.Character then return "Innocent" end
         local function checkContainer(c)
             if not c then return nil end
             for _, item in pairs(c:GetChildren()) do
                 if item:IsA("Tool") then
-                    local n = item.Name:lower()
-                    if n:find("knife") or n:find("blade") then return "Murderer"
-                    elseif n:find("gun") or n:find("revolver") or n:find("pistol") then return "Sheriff" end
+                    local kind = tp.toolType(item)
+                    if kind == "Knife" then return "Murderer"
+                    elseif kind == "Gun" then return "Sheriff" end
                 end
             end
             return nil
@@ -4331,6 +4769,36 @@ function startMainScript()
     local coinCache = {}
     local coinScanClock = 999
     local coinBlacklist = {}   -- Coin part -> os.clock() when the lock expires
+
+    -- COIN HITBOX (suwak 1x-100x): powiększamy LOKALNIE rozmiary monet/cukierków.
+    -- Większy hitbox = serwer łapie dotyk z daleka = szybszy farm. Oryginalne
+    -- rozmiary pamiętamy w tp.coinOrig, przy 1x przywracamy 1:1.
+    task.spawn(function()
+        while true do
+            if not isCurrentGen() then return end
+            task.wait(0.4)
+            local s = tp.coinHit or 1
+            local orig = tp.coinOrig
+            if not orig then
+                orig = {}
+                tp.coinOrig = orig
+            end
+            for _, c in ipairs(coinCache) do
+                if c and c.Parent and c:IsA("BasePart") then
+                    local o = orig[c]
+                    if not o then
+                        o = c.Size
+                        orig[c] = o
+                    end
+                    if s > 1 then
+                        c.Size = o * s
+                    elseif c.Size ~= o then
+                        c.Size = o
+                    end
+                end
+            end
+        end
+    end)
     local farmStuckCoin = nil  -- coin we stand on that does nothing
     local farmStuckDist = nil  -- its distance from the last PROGRESS (a measurement, not a timer)
     -- movement coordination (Auto Farm / TP Farm / Auto Kill All / Auto TP Gun):
@@ -4348,14 +4816,15 @@ function startMainScript()
     -- CANDY BAG STATE: full = flying after more candy makes no
     -- sense (the pickup server would not register it anyway). Then we fling
     -- the murderer. A timer, not every frame - this is GUI, not a model.
-    local farmBag = { full = false, clock = 0, pelny = false, wyl = false, reczny = false, sheriffAuto = false }
+    local farmBag = { full = false, clock = 0, pelny = false, wyl = false, reczny = false, sheriffAuto = false,
+        flyNow = false, floorY = nil }   -- flyNow = lot prowadzi postac (nurkowanie odpuszcza), floorY = wierzch podlogi na wynurzenie
     -- FLING/ANTI-VOID STATE (one table: Lua has a 200 register
     -- limit per function, and a separate local per parameter broke the compilation).
     --  * safe   = position we started the fling from (we return there)
     --  * active = fling in progress -> farms must not move the character
     --  * spawn  = we died during the fling -> after respawn go to the lobby spawn
     --  * last   = last position "on the ground" (anti-void rescue point)
-    local flingBack = { safe = nil, active = false, spawn = false }
+    local flingBack = { safe = nil, active = false, spawn = false, smierc = false, smiercAt = 0 }
     local voidState = { last = nil, at = 0 }
 
     -- ============================================================
@@ -4422,9 +4891,45 @@ function startMainScript()
             end
         end
 
+        -- 1b) SMIERC = ODWET (flagi leza w flingBack = brak nowych locali,
+        --     bo limit 200 rejestrow wciaz blisko). Jak nas zabija - przez
+        --     ~15 s podbijamy morderce (Twoja prosba: "jak umre to flinguje
+        --     morderce"). Znacznik odswiezamy co klatke martwej postaci, wiec
+        --     okno zaczyna biec OD ODRODZENIA, nie od smierci - inaczej mogloby
+        --     wygasnac zanim sie odrodzimy.
+        if hum.Health <= 0 and not isInLobby(hrp.Position, 25) then
+            -- ODWET tylko ze smierci NA MAPIE = prawdziwe zabojstwo. Reset na
+            -- KONCU rundy tez zabija - odwet wtedy wywalal nas w kosmos akurat
+            -- gdy wracalismy na spawn.
+            flingBack.smierc = true
+            flingBack.smiercAt = os.clock()
+        elseif flingBack.smierc then
+            -- zyjemy w oknie odwetu (odrodzilismy sie): punkt "bezpieczny"
+            -- = tu, gdzie TERAZ stoimy (lobby), NIE miejsce smierci na mapie.
+            -- Bez tego po odrodzeniu teardown flingu cofalby nas na mape
+            -- do martwego ciala zamiast zostawic w lobby.
+            flingBack.safe = hrp.Position
+            if os.clock() - (flingBack.smiercAt or 0) > 15 then
+                flingBack.smierc = false   -- 15 s po odrodzeniu odwet sam gasnie
+            end
+        end
+
         -- 2) WHO IS THE TARGET (order matters)
         local celHrp, autoFarma = nil, false
-        if flingTargetEnabled and targetPlayerName then
+        -- ODWET PO SMIERCI - NAJWIEKSZY priorytet: jak nas zabija, przez ~15 s
+        -- podbijamy morderce. isTargetValid wylacza nas samych, martwych oraz
+        -- graczy w lobby (nie flingujemy podczas glosowania/mapy wyboru).
+        if flingBack.smierc then
+            for _, p in ipairs(playersService:GetPlayers()) do
+                if p ~= plr and p.Character and getRole(p) == "Murderer"
+                    and isTargetValid(p) then
+                    celHrp = getHRP(p.Character)
+                    break
+                end
+            end
+        end
+        -- cel nazwany (Fling Target) tylko gdy odwet nikogo nie wybral
+        if not celHrp and flingTargetEnabled and targetPlayerName then
             local p = playersService:FindFirstChild(targetPlayerName)
             celHrp = p and getHRP(p.Character)
         end
@@ -4575,8 +5080,8 @@ function startMainScript()
             -- MEGA-FLING teardown: hand his body back - destroy the forces, give
             -- the network ownership and the standing pose to his own client.
             -- If he is already dead/gone the refs are dead too - pcall swallows it
-            if flingBack.bv then pcall(function() flingBack.bv:Destroy() end) flingBack.bv = nil end
-            if flingBack.ba then pcall(function() flingBack.ba:Destroy() end) flingBack.ba = nil end
+            if flingBack.bv then pcall(function() flingBack.bv:Destroy() end); flingBack.bv = nil end
+            if flingBack.ba then pcall(function() flingBack.ba:Destroy() end); flingBack.ba = nil end
             if flingBack.chum and flingBack.chum.Parent then
                 pcall(function()
                     flingBack.chum.PlatformStand = false
@@ -4590,15 +5095,20 @@ function startMainScript()
             -- back to the plain button text (a new round empties the bag)
             if autoFarmCoins then b13.Text = "Auto Farm Coins: ON" end
             if hum and hum.Health > 0 and flingBack.safe then
-                -- ALIVE: we return to the map, where we started the fling
-                hrp.CFrame = CFrame.new(flingBack.safe)
-                hrp.Velocity = Vector3.new(0, 0, 0)
-                hrp.RotVelocity = Vector3.new(0, 0, 0)
-                -- Assembly* too: after the fling OUR velocity was 30000 on the
-                -- assembly; if the proxies do not zero it, Anti-Fling v2 would
-                -- treat our own return jump as an attack and snap us back
-                hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-                hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                -- Powrot na mape (gdzie zaczynalismy fling) - TYLKO gdy runda
+                -- jeszcze trwa. Po KONCU rundy gra stawia nas w lobby, a stary
+                -- kod ciagnal z powrotem na stara mape = "wypierdala daleko od
+                -- spawna jak sie runda konczy".
+                if not isInLobby(hrp.Position, 25) then
+                    hrp.CFrame = CFrame.new(flingBack.safe)
+                    hrp.Velocity = Vector3.new(0, 0, 0)
+                    hrp.RotVelocity = Vector3.new(0, 0, 0)
+                    -- Assembly* too: after the fling OUR velocity was 30000 on the
+                    -- assembly; if the proxies do not zero it, Anti-Fling v2 would
+                    -- treat our own return jump as an attack and snap us back
+                    hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                    hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                end
                 hum.PlatformStand = false
                 hum.AutoRotate = true
             elseif hum and hum.Health <= 0 then
@@ -4716,7 +5226,7 @@ function startMainScript()
         for _, p in ipairs(playersService:GetPlayers()) do
             local c = p.Character
             local h = c and c:FindFirstChild("HumanoidRootPart")
-            if h and not isInLobby(h.Position, 40) then ktosNaMapie = true break end
+            if h and not isInLobby(h.Position, 40) then ktosNaMapie = true; break end
         end
         if not ktosNaMapie then
             mapCenter, mapCenterAt = nil, tick()
@@ -4878,7 +5388,7 @@ function startMainScript()
     -- startMainScript filled the budget completely and the compilation broke
     -- already at the farm declarations (farmJumpAt). Own function = own limit.
     setupTeleportTab()
-    local farmSideAt = 0            -- when we last switched the avoidance side
+    local _farmSideAt = 0            -- when we last switched the avoidance side
     local farmJumpAt = 0            -- jump cooldown (both farms) - without it we jumped every frame
     local farmRayParams = RaycastParams.new()  -- raycast parameters (obstacles in the path)
     farmRayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -4985,6 +5495,80 @@ function startMainScript()
         end
     end
 
+    ------------------------------------------------------------
+    -- COIN ESP: zlote podswietlenie zywych cukierkow/coinow (Highlight
+    -- AlwaysOnTop). Znaczniki siedza w tp.coinMarks (zero nowych locali -
+    -- limit 200 rejestrow w funkcji budujacej) i sprzataja sie same:
+    -- po zebraniu coina, po zmianie rundy i przy wylaczeniu opcji.
+    -- Podswietlamy WIDOCZNA czesc coina (MainCoin), nie niewidzialny
+    -- czujnik dotyku - na nim highlighta nie byloby widac.
+    ------------------------------------------------------------
+    tp.coinEsp = false
+    tp.coinMarks = {}
+    tp.coinEspAt = 0
+
+    tp.ui.bCoinEsp.MouseButton1Click:Connect(function()
+        tp.coinEsp = not tp.coinEsp
+        tp.ui.bCoinEsp.Text = tp.coinEsp and "Coin ESP: ON" or "Coin ESP: OFF"
+        tp.ui.bCoinEsp.BackgroundColor3 = tp.coinEsp and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
+        updateActiveCheatsList()
+        if not tp.coinEsp then
+            for _, hl in pairs(tp.coinMarks) do
+                pcall(function() hl:Destroy() end)
+            end
+            tp.coinMarks = {}
+        else
+            tp.coinEspAt = 0 -- lista coinow od razu
+        end
+    end)
+
+    runService.RenderStepped:Connect(function()
+        if not isCurrentGen() then return end
+        if not tp.coinEsp then return end
+        local now = os.clock()
+        if now >= tp.coinEspAt then
+            tp.coinEspAt = now + 1.0
+            pcall(refreshCoinCache, false)
+        end
+        -- sprzatanie: coiny znikniete z gry (zmiana rundy) tez znikaja z listy
+        for coin, hl in pairs(tp.coinMarks) do
+            if not coin.Parent then
+                pcall(function() hl:Destroy() end)
+                tp.coinMarks[coin] = nil
+            end
+        end
+        for _, coin in ipairs(coinCache) do
+            local hl = tp.coinMarks[coin]
+            if not isCoinAlive(coin) then
+                if hl then
+                    pcall(function() hl:Destroy() end)
+                    tp.coinMarks[coin] = nil
+                end
+            elseif not hl then
+                local vis = coin:FindFirstChild("MainCoin", true)
+                    or (coin.Parent and coin.Parent:FindFirstChild("MainCoin"))
+                    or coin
+                pcall(function()
+                    local h = Instance.new("Highlight")
+                    h.Name = "SzpontCoinESP"
+                    h.Adornee = vis
+                    h.FillColor = Color3.fromRGB(255, 190, 40)   -- zloto
+                    h.OutlineColor = Color3.fromRGB(255, 225, 120)
+                    h.FillTransparency = 0.55
+                    h.OutlineTransparency = 0
+                    h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                    h.Parent = vis
+                    tp.coinMarks[coin] = h
+                end)
+            end
+        end
+    end)
+
+    -- Candy Spoof zyje WCZESNIEJ (kolo Coin ESP) z watchdogiem - tu tylko
+    -- shim do listy aktywnych (updateActiveCheatsList powstaje dopiero nizej
+    -- i wczesny handler nie widzi go jako local)
+    tp.updateCheats = updateActiveCheatsList
+
     b13.MouseButton1Click:Connect(function()
         autoFarmCoins = not autoFarmCoins
         b13.Text = autoFarmCoins and "Auto Farm Coins: ON" or "Auto Farm Coins: OFF"
@@ -5014,9 +5598,16 @@ function startMainScript()
             -- POD podloga (lezy na plecach). Bez tego raycastu postac
             -- zostalaby w srodku geometrii mapy z przywrocona kolizja =
             -- uwieziona. Wyciagamy na powierzchnie ZANIM wroci CanCollide.
-            if hrpOff then
+            -- W LOBBY NIE RUSZAMY postaci (stary kod teleportowal ja na
+            -- pierwsza powierzchnie nad glowa = "postac znika").
+            if hrpOff and not isInLobby(hrpOff.Position, 25) then
                 local rayOff = workspace:Raycast(hrpOff.Position, Vector3.new(0, 200, 0), farmRayParams)
-                if rayOff then
+                if farmBag.floorY then
+                    -- znamy wierzch podlogi z nurkowania - celniej niz promien
+                    -- w gore (ten lapal pierwsza przeszkode nad glowa = postac
+                    -- ladowala w scianie i "znikala")
+                    hrpOff.CFrame = CFrame.new(hrpOff.Position.X, farmBag.floorY + 2, hrpOff.Position.Z)
+                elseif rayOff then
                     hrpOff.CFrame = CFrame.new(rayOff.Position + Vector3.new(0, 4, 0))
                     hrpOff.Velocity = Vector3.new(0, 0, 0)
                     hrpOff.RotVelocity = Vector3.new(0, 0, 0)
@@ -5130,6 +5721,25 @@ function startMainScript()
                                 local staryRot = hum.AutoRotate
                                 hum.WalkSpeed = tp.walk
                                 hum.AutoRotate = false
+                                -- WYNIURZ PRZED CHODZENIEM: nurkowanie trzyma postac POD
+                                -- podloga, a silnik chodzi poziomo - bez wynurzenia TP Farm
+                                -- "chodzilby" pod podlaga i nie mogl przejsc "przez sufit"
+                                -- do cukierka na gorze. Wierzch podlogi znamy z nurkowania
+                                -- (farmBag.floorY) - stawiamy postac dokladnie NA NIEJ.
+                                if hum.PlatformStand and farmBag.floorY then
+                                    hrp.CFrame = CFrame.new(hrp.Position.X, farmBag.floorY + 1, hrp.Position.Z)
+                                    hrp.AssemblyLinearVelocity = Vector3.zero
+                                    hrp.AssemblyAngularVelocity = Vector3.zero
+                                end
+                                hum.PlatformStand = false
+                                -- KOLIZJA: noclip farmy zdejmuje ja z calej postaci,
+                                -- a chodzacy czlowiek BEZ kolizji nie ma po czym idac
+                                -- (zapada sie) = "rotatuje do cukierkow i nie rusza".
+                                -- Przywracamy na czas chodzenia (petla noclippu ma tez
+                                -- wyjatek dla tp.walking).
+                                for _, p in ipairs(char:GetChildren()) do
+                                    if p:IsA("BasePart") then p.CanCollide = true end
+                                end
 
                                 local koniec = os.clock() + 4
                                 tp.walking = true
@@ -5148,9 +5758,23 @@ function startMainScript()
                                     if not tp.on or hum.Health <= 0 then break end
                                     local off = target - hrp.Position
                                     if off.Magnitude <= 3.2 then break end
-                                    hrp.CFrame = CFrame.lookAt(
-                                        hrp.Position,
-                                        Vector3.new(target.X, hrp.Position.Y, target.Z))
+                                    -- SILNIK niesie postac w strone cukierka (hum:Move),
+                                    -- a gdyby gra nie niosla (WalkSpeed trzymany przez jej
+                                    -- antycheata) DOKLEJAMY maly krok CFrame (~40 studow/s
+                                    -- = bezpieczny prog serwera): postac ZAWSZE idzie do
+                                    -- cukierka, nigdy tylko "rotatuje w miejscu".
+                                    local kier = Vector3.new(off.X, 0, off.Z)
+                                    if kier.Magnitude > 0.05 then
+                                        local jedn = kier.Unit
+                                        hum:Move(jedn, false)
+                                        local krok = math.min(kier.Magnitude, 2.0)
+                                        hrp.CFrame = CFrame.new(hrp.Position + jedn * krok,
+                                            Vector3.new(target.X, hrp.Position.Y, target.Z))
+                                    else
+                                        hrp.CFrame = CFrame.lookAt(
+                                            hrp.Position,
+                                            Vector3.new(target.X, hrp.Position.Y, target.Z))
+                                    end
                                 end
                                 tp.walking = false
 
@@ -5238,7 +5862,7 @@ function startMainScript()
     -- (limit rejestrow Luau) - osobne local-e tutaj wywalaly kompilacje
     -- ("Out of local registers" na originalPos), wiec GUI i skaner sa
     -- wewnatrz domkniecia, a na zewnatrz trafia TYLKO expUi.
-    local expUi = (function()
+    local _expUi = (function()
         makePage("Exploits")
         local tbExp = Instance.new("TextButton")
         tbExp.Name = "ExploitsTab"
@@ -5265,7 +5889,7 @@ function startMainScript()
         lbl.TextColor3 = themes[currentTheme].TextCol
         lbl.TextSize = 11
         lbl.Font = Enum.Font.SourceSansBold
-        lbl.Text = "Candy: (wylaczone)"
+        lbl.Text = "Candy: (disabled)"
         lbl.LayoutOrder = 2
         lbl.ZIndex = 3
         lbl.Parent = pages["Exploits"]
@@ -5338,7 +5962,7 @@ function startMainScript()
             if vac.on then
                 vac.scanAt = 0  -- pierwsze skanowanie od razu
                 vac.skip = {}   -- nowa proba: czyscimy liste odfiltrowanych candy
-                lbl.Text = "Candy: szuka..."
+                lbl.Text = "Candy: searching..."
             elseif plr.Character then
                 -- przy wylaczeniu przywracamy domyslne stany (lot ustawia
                 -- PlatformStand + wylacza kolizje wlasnych czesci)
@@ -5351,7 +5975,7 @@ function startMainScript()
                 for _, p in ipairs(plr.Character:GetChildren()) do
                     if p:IsA("BasePart") then p.CanCollide = true end
                 end
-                lbl.Text = "Candy: (wylaczone)"
+                lbl.Text = "Candy: (disabled)"
             end
         end)
 
@@ -5375,7 +5999,7 @@ function startMainScript()
             if teraz >= vac.scanAt then
                 pcall(scan)
                 vac.scanAt = teraz + 1.0
-                lbl.Text = "Candy w zasiegu: " .. #vac.cache
+                lbl.Text = "Candy in range: " .. #vac.cache
             end
             -- najblizsze zywe candy (zebrane juz wychodza z listy)
             local nearest, bestDist = nil, FARM_TARGET_RANGE
@@ -5457,7 +6081,7 @@ function startMainScript()
     --   wiec Twoja mapa (np. Mineshaft) przegrywala. Teraz Twoja mapa zbiera
     --   najwiecej glosow i zawsze wygrywa. Klik zatrzymuje spam.
     -- ============================================================
-    local mapUi = { voted = false, aktywne = false, oddane = nil, btns = {}, spamOn = false, spamMapa = nil, spamGen = 0 }
+    local mapUi = { voted = false, aktywne = false, oddane = nil, btns = {}, btnMapa = {}, spamOn = false, spamMapa = nil, spamGen = 0 }
 
     mapUi.status = Instance.new("TextLabel")
     mapUi.status.Size = UDim2.new(0.95, 0, 0, 26)
@@ -5466,7 +6090,7 @@ function startMainScript()
     mapUi.status.TextSize = 11
     mapUi.status.Font = Enum.Font.SourceSansBold
     mapUi.status.TextXAlignment = Enum.TextXAlignment.Left
-    mapUi.status.Text = "Map Picker: czekam na glosowanie map..."
+    mapUi.status.Text = "Map Picker: waiting for map voting..."
     mapUi.status.LayoutOrder = 3
     mapUi.status.ZIndex = 3
     mapUi.status.Parent = pages["Exploits"]
@@ -5526,16 +6150,18 @@ function startMainScript()
     mapUi.glosuj = function(nazwa, info, mojBtn)
         local pad = info and info.pad
         if not pad then
-            mapUi.status.Text = "Map Picker: brak padlka"
+            mapUi.status.Text = "Map Picker: no voting pad found"
             return
         end
-        if mapUi.spamOn and mapUi.spamMapa == nazwa then
-            -- klik w TA SAMA mape = STOP (drugi klik na aktywnej mape konczy
-            -- spam). Wcześniej zatrzymywal kazdy klik - teraz tylko ten sam.
-            mapUi.spamGen = mapUi.spamGen + 1   -- zabija stara petle
+        if mapUi.spamMapa == nazwa or mapUi.oddane == nazwa then
+            -- klik w TA SAMA mape = WYLACZNIK (zawsze): w trakcie spamu STOP,
+            -- po nim NIC (nie wznawia). Wczesniej po limicie 12 glosow klik
+            -- startowal NOWA paczke = "nie przestaje jej wybierac", a po
+            -- resecie rundy (spamMapa=nil przy spamOn=true) tez wznawial.
+            mapUi.spamGen = mapUi.spamGen + 1   -- zabija ewentualna petle
             mapUi.spamOn = false
             mapUi.spamMapa = nil
-            mapUi.status.Text = "Map Picker: zatrzymano"
+            mapUi.status.Text = "Map Picker: stopped - " .. nazwa .. " (click another = new)"
             return
         end
         -- klik w INNA mape (albo pierwszy) = start/naprzemiana: nowy numer
@@ -5549,7 +6175,7 @@ function startMainScript()
             mojBtn.Text = "Spam: " .. nazwa
             mojBtn.BackgroundColor3 = themes[currentTheme].Primary
         end
-        mapUi.status.Text = "Map Picker: glosuje za " .. nazwa .. "..."
+        mapUi.status.Text = "Map Picker: voting for " .. nazwa .. "..."
         task.spawn(function()
             local licznik = 0
             -- LIMIT 12 GLOSOW: po 12 petla sama sie konczy. Sprawdzamy tez
@@ -5571,7 +6197,7 @@ function startMainScript()
                     task.wait(0.28)
                     -- RESET: pozwala zaglosowac ponownie (exploit gry)
                     licznik = licznik + 1
-                    mapUi.status.Text = "Map Picker: " .. nazwa .. " (glos " .. licznik .. ")"
+                    mapUi.status.Text = "Map Picker: " .. nazwa .. " (vote " .. licznik .. ")"
                     pcall(function() ch:BreakJoints() end)
                     -- czekaj az sie odrodzi (max 4 s)
                     local t = 0
@@ -5591,10 +6217,11 @@ function startMainScript()
             if mapUi.spamGen == mojGen then
                 mapUi.spamOn = false
                 mapUi.spamMapa = nil
+                mapUi.voted = true   -- glosy oddane: status ma pokazywac "zaglosowano"
                 if isCurrentGen() and mapUi.status then
                     mapUi.status.Text = licznik >= 12
-                        and ("Map Picker: " .. tostring(mapUi.oddane or "") .. " - limit 12 glosow")
-                        or ("Map Picker: zakonczono (glosow: " .. licznik .. ")")
+                        and ("Map Picker: " .. tostring(mapUi.oddane or "") .. " - 12 votes limit")
+                        or ("Map Picker: finished (votes: " .. licznik .. ")")
                 end
             end
         end)
@@ -5605,6 +6232,7 @@ function startMainScript()
     mapUi.odbuduj = function(mapa)
         for _, b in ipairs(mapUi.btns) do pcall(function() b:Destroy() end) end
         mapUi.btns = {}
+        mapUi.btnMapa = {}
         local i = 0
         for nazwa, info in pairs(mapa) do
             i = i + 1
@@ -5624,6 +6252,7 @@ function startMainScript()
             b.MouseButton1Click:Connect(function()
                 mapUi.glosuj(nazwa, info, b)
             end)
+            mapUi.btnMapa[b] = nazwa   -- odswiezanie NA MIEJSCU bez przebudowy
             table.insert(mapUi.btns, b)
         end
     end
@@ -5649,29 +6278,32 @@ function startMainScript()
                     mapUi.aktywne = true
                     mapUi.voted = false
                     mapUi.oddane = nil
-                    mapUi.spamMapa = nil
+                    mapUi.spamOn = false    -- bez tego: spamOn=true + spamMapa=nil
+                    mapUi.spamMapa = nil    -- = klik w te sama mape WZNawial zamiast zatrzymac
                     mapUi.spamGen = mapUi.spamGen + 1  -- zabija stara petle spamu
+                    -- przyciski BUDUJEMY tylko na nowy zestaw map
+                    mapUi.odbuduj(mapa)
                 end
-                -- odswiez przyciski, ale NIE kasuj podswietlenia juz oddanego
-                local oddane = mapUi.oddane
+                -- odswiezanie NA MIEJSCU (BEZ niszczenia przyciskow!): przebudowa
+                -- co 0.7 s zerala kliniecia = "klikam i nie przestaje"
+                local aktywna = mapUi.spamMapa or mapUi.oddane
                 local trwaSpam = mapUi.spamOn
-                local aktywna = mapUi.spamMapa or oddane
-                mapUi.odbuduj(mapa)
-                if aktywna then
-                    -- przywracamy podswietlenie: "Spam:" gdy trwa, "OK:" gdy juz oddano
-                    for _, b in ipairs(mapUi.btns) do
-                        if b.Text:find(aktywna, 1, true) then
-                            b.Text = (trwaSpam and "Spam: " or "OK: ") .. aktywna
-                            b.BackgroundColor3 = themes[currentTheme].Primary
-                        end
+                for _, b in ipairs(mapUi.btns) do
+                    local n = mapUi.btnMapa[b]
+                    local info = n and mapa[n]
+                    if n then
+                        b.Text = ((aktywna == n) and (trwaSpam and "Spam: " or "OK: ") or "")
+                            .. n .. (info and info.votes ~= "" and ("  [" .. info.votes .. "]") or "")
+                        b.BackgroundColor3 = (aktywna == n)
+                            and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
                     end
                 end
                 -- status NADPISUJ tylko gdy nie trwa spam (spam sam liczy glosy
                 -- co petle - nadpisanie kasowaloby licznik "glos N")
                 if not mapUi.spamOn then
                     mapUi.status.Text = mapUi.voted
-                        and ("Map Picker: zaglosowano na " .. tostring(mapUi.oddane))
-                        or ("Map Picker: wybierz mape (" .. ile .. " dostepnych)")
+                        and ("Map Picker: voted for " .. tostring(mapUi.oddane))
+                        or ("Map Picker: pick a map (" .. ile .. " available)")
                 end
             elseif mapUi.aktywne then
                 -- glosowanie sie skonczylo / nowa runda - resetujemy do zera
@@ -5684,7 +6316,7 @@ function startMainScript()
                 mapUi.spamGen = mapUi.spamGen + 1
                 for _, b in ipairs(mapUi.btns) do pcall(function() b:Destroy() end) end
                 mapUi.btns = {}
-                mapUi.status.Text = "Map Picker: czekam na glosowanie map..."
+                mapUi.status.Text = "Map Picker: waiting for map voting..."
             end
         end
     end)
@@ -5708,7 +6340,10 @@ function startMainScript()
     -- touch MAP collision at all - previously it left holes in it for the rest of the round.
     runService.Stepped:Connect(function()
         if not isCurrentGen() then return end
-        if not autoFarmCoins or farmLegit then return end
+        -- TP Farm AKTYWNIE chodzi (tp.walking) = postac MUSI miec kolizje;
+        -- chodzacy czlowiek bez kolizji zapada sie i nie idzie ("rotatuje do
+        -- cukierkow i nie rusza") - wiec na czas chodzenia NIE zdejmujemy kolizji
+        if not autoFarmCoins or farmLegit or tp.walking then return end
         local ch = plr.Character
         if not ch then return end
         -- NA SPAWNIE (lobby) kolizja MUSI zostac: z noclipoem gracz zapadalby
@@ -5756,7 +6391,12 @@ function startMainScript()
             local jump = (cf.Position - antiFlingLast.Position).Magnitude
             local spike = math.max(hrp.AssemblyLinearVelocity.Magnitude,
                 hrp.AssemblyAngularVelocity.Magnitude)
-            if jump > 40 and spike > 250 then
+            -- W LOBBY NIE COFAMY: po koncu rundy gra TELEPORTUJE nas na spawn
+            -- (skok >40 studow + resztkowa predkosc = "atak" wg tej reguly) i
+            -- stary kod cofal z powrotem na stara mape = "wypierdala daleko od
+            -- spawna jak sie runda konczy". To wlasnie byl blad, ktorego kiedys
+            -- nie bylo (Anti-fLing z configow).
+            if jump > 40 and spike > 250 and not isInLobby(cf.Position, 40) then
                 hrp.CFrame = antiFlingLast
                 hrp.AssemblyLinearVelocity = Vector3.zero
                 hrp.AssemblyAngularVelocity = Vector3.zero
@@ -5784,16 +6424,74 @@ function startMainScript()
             return
         end
 
-        -- FULL BAG = FARM PAUSE: with a full bag the pickup
-        -- server will not count it anyway, so flying after candies is just flying after
-        -- "invisible" candies - and on top of that the character FIGHTS over CFrame with
-        -- Auto Kill All (murderer) and with the murderer fling (innocent).
-        -- Both of these control CFrame every frame, so without this pause
-        -- auto-kill would teleport to the target and the farm back to
-        -- the candy - result: nobody got anywhere (no kill happened).
-        if farmBag.full then
-            farmIdle = true
+        -- RECZNY FLY (Movement tab) = gracz SAM prowadzi postac: farma musi
+        -- calkowicie odpuscic. Wczesniej lot do cukierka zrzucal graczowi
+        -- kontrole w polowie lotu = "nie moge doleciec do spawna".
+        if flying then
+            farmIdle = false   -- TP Farm tez ma sie odsunac
             return
+        end
+
+        -- NA MAPIE = NATYCHMIAST POD PODLOGE (PIERWSZA rzecz po teleportzie).
+        -- Wczesniej nurkowanie bylo dopiero w galezi ruchu, a wczejsze `returny`
+        -- (PELNY WOREK, brak celu przez pierwsze 0.3 s skanu) robily return
+        -- PRZED nurkowaniem - postac stala wiec na powierzchni i ludzie ja
+        -- targetowali. Teraz chowamy sie jako PIERWSZA rzecz, o ile:
+        --   * nie jestesmy w lobby (bramka nizej robi swoje),
+        --   * tryb nie jest "chodzacy" (legit musi stac na nogach),
+        --   * zaden inny system nie prowadzi JUZ postaci (fly/fling/kill/annoy/
+        --     auto kill) - z nimi nie walczymy o CFrame. UWAGA: TP Farm blokuje
+        --     nurkowanie TYLKO w trakcie aktywnego chodzenia (tp.walking) -
+        --     sam fakt, ze jest WLACZONY, nie moze trzymac postaci na widoku
+        --     (diagnoza z konsoli: "BLOCKED tp" przez caly countdown).
+        --     Candy Vacuum w ogole nie rusza postaci (ciagnie cukierki do niej),
+        --     wiec nie blokuje niczego. UWAGA 2: gdy Vacuum AKTYWNIE prowadzi
+        --     postac do candy (lastCandy) - nurkowanie odpuszcza, bo zbija jego
+        --     poke przy candy i cukierki nie trafiaja do worka.
+        --   * lot AKTYWNIE prowadzi postac (flyNow): lot sam leci pod podloga
+        --     i WYLATUJE w gore po cukierka, gdy jest pod nim - gdyby nurkowanie
+        --     ciagnelo postac w dol w trakcie lotu, postac docierala pod cukierek
+        --     (w poziomie), ale nigdy nie wychodzila w gore "przez sufit" po niego.
+        if not farmLegit
+            and not farmBag.flyNow
+            and not (flying or flingTargetEnabled or killBusy or autoKillAll
+                or autoKillMurder or flingBack.spawn or annoyEnabled
+                or gunDropRef or tp.walking or tp.candy.lastCandy)
+            and not isInLobby(hrp.Position, 25)
+            and hum.Health > 0 then
+            hum.PlatformStand = true
+            hum.AutoRotate = false
+            if farmRayParams.FilterDescendantsInstances[1] ~= ch then
+                farmRayParams.FilterDescendantsInstances = { ch }
+            end
+            -- PROMIEN Z CENTRUM (nie z +10 nad glowa): start nad glowa trafial
+            -- w sufit budynku i zamiast POD PODLOGE postac trafiala DO SUFITU.
+            local rn = workspace:Raycast(hrp.Position, Vector3.new(0, -50, 0), farmRayParams)
+            local yDol = hrp.Position.Y
+            -- NURKUJ TYLKO gdy podloga jest TUTAJ (blisko pod nogami). Gdy lecimy
+            -- JUZ pod podloga do cukierka, promien trafia w teren/barierke
+            -- PONIZEJ (20-50 studow) i STARY kod ciagnal postac w dol co klatke -
+            -- lot walczyl z nurkowaniem, postac stala w miejscu i cukierki sie
+            -- NIE ZBIERALY (trafialy na czarna liste "stuck"). W takim wypadku
+            -- trzymamy TYLKO wysokosc (yDol = obecna) - lot sam prowadzi postac.
+            if rn and (hrp.Position.Y - rn.Position.Y) < 8 then
+                yDol = rn.Position.Y - 3
+                -- zapamietujemy WIERZCH podlogi: TP Farm musi sie na niej
+                -- wynurzyc przed chodzeniem, bo silnik nie przejdzie "przez
+                -- sufit" (podloge nad postacia) do cukierka na gorze
+                farmBag.floorY = rn.Position.Y
+            end
+            -- poziomy kierunek z obecnej postawy; po nurkowaniu LookVector
+            -- wskazuje w dol (lezymy plackiem) -> wtedy fallback (0,0,1)
+            local hz = hrp.CFrame.LookVector
+            hz = Vector3.new(hz.X, 0, hz.Z)
+            if hz.Magnitude < 0.01 then hz = Vector3.new(0, 0, 1) end
+            local cel = Vector3.new(hrp.Position.X, yDol, hrp.Position.Z)
+            hrp.CFrame = CFrame.new(cel, cel + hz) * CFrame.Angles(math.rad(-90), 0, 0)
+            hrp.Velocity = Vector3.new(0, 0, 0)
+            hrp.RotVelocity = Vector3.new(0, 0, 0)
+            hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
         end
 
         -- 1) coin list: refresh once per second (a full workspace scan
@@ -5847,6 +6545,12 @@ function startMainScript()
                 end
             end
         end
+
+        -- LOT AKTYWNY = nurkowanie odpuszcza w NASTEPEJ klatce (flaga czytana
+        -- jest na gorze handlera, wiec dziala z jednoklatkowym opoznieniem -
+        -- i tak lot pisze CFrame PO nurkowaniu w tej samej klatce, wiec bitwy
+        -- o pozycje nie ma). Ucieczka tez sie liczy: tez leci pod podloga.
+        farmBag.flyNow = (target ~= nil or farmMurderClose) and not farmBag.full
 
         -- 5) INFO in the button: the farm says why it is standing
         local powod = nil
@@ -5919,6 +6623,17 @@ function startMainScript()
             return
         end
 
+        -- FULL BAG = FARM PAUSE (przeniesione ZA bramke lobby): z pelnym workiem
+        -- zbiorka cukierkow i tak nic nie zalicza, a postac FIGHTOWALABY o CFrame
+        -- z Auto Kill All / flingiem. Wczesniej ten return byl PRZED bramka lobby -
+        -- w lobby bramka nie zdazyla wypuscic postaci i gracz utykal w geometrii
+        -- spawnu ("w suficie w glosowaniu mapy"). Teraz: najpierw bramka lobby
+        -- wypuszcza postac, dopiero potem (na mapie) ten return pauzuje farme.
+        if farmBag.full then
+            farmIdle = true
+            return
+        end
+
         local fleeDir = nil
         if farmMurderClose and farmBag.mpos then
             fleeDir = hrp.Position - farmBag.mpos
@@ -5973,7 +6688,7 @@ function startMainScript()
                             local tan = Vector3.new(-n.Z, 0, n.X)
                             if tan:Dot(flat) < 0 then tan = -tan end
                             flat = tan
-                            farmSideAt = os.clock()
+                            _farmSideAt = os.clock()
                         end
                     end
                     -- rotation + ENGINE (the character walks on the ground)
@@ -6028,21 +6743,32 @@ function startMainScript()
                         hum.AutoRotate = false
                     end
                     local dir3 = dir.Unit
-                    local speed = math.clamp(farmSpeed, 16, FARM_FLY_MAX_SPEED)
-                    local krok = math.min(dist, speed * dt, FARM_MAX_STEP)
-                    local nextPos = hrp.Position + dir3 * krok
-                    -- LOOK wzdloc lotu, potem * Angles(-90) = LEZENIE NA PLECACH
-                    -- (twarz do gory). Stare Angles(90) = na brzuchu, przez co
-                    -- postac wykonywala salto w locie (uzytkownik: "wyginal sie").
-                    hrp.CFrame = CFrame.new(nextPos, nextPos + dir3) * CFrame.Angles(math.rad(-90), 0, 0)
-                    -- ZERUJ WSZYSTKIE cztery predkosci: same Velocity/RotVelocity
-                    -- nie wystarczaly - fizyka liczyla Assembly* i krecila cialem
-                    -- dalej (to wlasnie bylo to wyginanie/salto). Teraz cialo lezy
-                    -- plasko i martwo.
-                    hrp.Velocity = Vector3.new(0, 0, 0)
-                    hrp.RotVelocity = Vector3.new(0, 0, 0)
-                    hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                    -- BYPASS "Invalid position" (WBUDOWANY w farme, bez osobnej
+                    -- opcji): ruch PREDKOSCIA zamiast skokow CFrame - serwer widzi
+                    -- zwykly ruch gracza, nie teleport = nie wywala. Predkosc to
+                    -- suwak Farm Speed x4 (40-220 studow/s) = zapierdala z coiny
+                    -- na coine, a sciany i tak przepuszcza noclip.
+                    tp.flyAt = os.clock() -- dla anti-fLing: to NASZ ruch, nie fling
+                    local v = math.clamp(farmSpeed * 4, 40, 220)
+                    hrp.AssemblyLinearVelocity = dir3 * v
+                    hrp.Velocity = dir3 * v
                     hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                    hrp.RotVelocity = Vector3.new(0, 0, 0)
+                    local rot = CFrame.Angles(math.rad(-90), 0, 0) -- LEZENIE NA PLECACH
+                    -- ASYSTA: gdyby fizyka niosla za slabo (gra trzyma predkosc),
+                    -- doklejamy maly krok CFrame (max 2 stady/klatke) - postac
+                    -- ZAWSZE leci do cukierka, nigdy nie stoi "i sie rotatuje"
+                    local przeszedl = tp.flyLast and (hrp.Position - tp.flyLast).Magnitude or v * dt
+                    if przeszedl < v * dt * 0.3 then
+                        local krok = math.min(dist, v * dt, FARM_MAX_STEP)
+                        hrp.CFrame = CFrame.new(hrp.Position + dir3 * krok,
+                            hrp.Position + Vector3.new(dir3.X, 0, dir3.Z)) * rot
+                    else
+                        -- sam obrot (bez translacji) = serwer tego nie waliduje
+                        hrp.CFrame = CFrame.new(hrp.Position,
+                            hrp.Position + Vector3.new(dir3.X, 0, dir3.Z)) * rot
+                    end
+                    tp.flyLast = hrp.Position
                 else
                     -- POKE OUT AT THE CANDY (within 1 stud of the under-point):
                     -- rise to 1 stud below it and stay LYING - the same pickup
@@ -6100,13 +6826,22 @@ function startMainScript()
                 hum.AutoRotate = true
                 hum.PlatformStand = false
                 farmIdle = (target == nil)
-            elseif tp.on or tp.candy.on then
-                -- postacia rzadza juz TP Farm / Candy Vacuum (maja priorytet) -
-                -- farma ich nie przypina, bo oba tez steruja CFrame
+            elseif tp.walking then
+                -- TP Farm AKTYWNIE prowadzi postac (chodzenie do cukierka) -
+                -- wtedy musi stac na nogach, zeby silnik ja niosl. Sam fakt
+                -- WLACZONEGO TP Farm juz nie stawia postaci na widoku (wczesniej
+                -- tak bylo: stala odkryta przez caly countdown i ludzie ja
+                -- targetowali). Candy Vacuum tylko ciagnie cukierki do postaci -
+                -- nie rusza nia, wiec nurkuje normalnie.
                 if hum then
                     hum.PlatformStand = false
-                    hum.AutoRotate = true
+                    hum.AutoRotate = false
                 end
+                farmIdle = true
+            elseif tp.candy.lastCandy then
+                -- Candy Vacuum AKTYWNIE prowadzi postac (lot pod podloga + poke
+                -- przy candy). Nie dotykamy postaci: kazde przypiecie nurkowania
+                -- zbijaloby jego poke przy candy i cukierki nie trafialy do worka.
                 farmIdle = true
             else
                 -- NA MAPIE, BRAK CELU (nawet gdy skan jeszcze nic nie widzial):
@@ -6137,6 +6872,7 @@ function startMainScript()
                 local podY = hrp.Position.Y
                 if ray and (hrp.Position.Y - ray.Position.Y) < 8 then
                     podY = ray.Position.Y - 3
+                    farmBag.floorY = ray.Position.Y   -- wierzch podlogi na wynurzenie
                 end
                 local cel = Vector3.new(hrp.Position.X, podY, hrp.Position.Z)
                 local look = hrp.CFrame.LookVector
@@ -6469,16 +7205,15 @@ function startMainScript()
         corner.Parent = fovFrame2
     end)
 
-    -- Returns the sheriff weapon only when it is HELD IN HAND
+    -- Returns the sheriff weapon when it is HELD IN HAND.
+    -- Typ broni ustala wspolne toolType() (nazwa ALBO baza gry - skiny nie
+    -- maja "gun" w nazwie, dlatego stary warunek ich nie lapal).
     local function getEquippedRevolver()
         local ch = plr.Character
         if not ch then return nil end
         local tool = ch:FindFirstChildOfClass("Tool")
         if not tool then return nil end
-        local n = tool.Name:lower()
-        if n:find("gun") or n:find("revolver") or n:find("pistol") then
-            return tool
-        end
+        if tp.toolType(tool) == "Gun" then return tool end
         return nil
     end
 
@@ -6501,10 +7236,17 @@ function startMainScript()
     runService.RenderStepped:Connect(function()
         if not isCurrentGen() then return end
         if not isCurrentGen() then return end
+        -- PPM: polling co klatke zamiast samych eventow InputBegan/Ended -
+        -- gdy gra/GUI zjada wejscie, InputEnded nie odpalal i kolko zostawalo
+        -- fioletowe mimo trzymanego PPM
+        mm2Ppm = uis:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
         -- armed = RMB aimbot OR Auto Kill Murder: the auto-kill needs the same
         -- persistent camera aim - every frame the camera is pinned on the
         -- murderer, so whenever the gun cycle lets a shot out it is already aimed
-        local armed = getEquippedRevolver() ~= nil and ((aimbotEnabled and mm2Ppm) or autoKillMurder)
+        -- FALLBACK ROLI: Sheriff zawsze ma bron przy sobie - gdy nazwa narzedzia
+        -- nic nie mowi (kolejny klon MM2), aim ma dzialac i tak
+        local armed = (getEquippedRevolver() ~= nil or getRole(plr) == "Sheriff")
+            and ((aimbotEnabled and mm2Ppm) or autoKillMurder)
 
         -- FOV circle: visible when the aimbot is on, green when AIMING,
         -- purple when it is only waiting (no RMB or no revolver)
@@ -6570,8 +7312,15 @@ function startMainScript()
                                 -- the murderer keeps running - aim slightly ahead (capped
                                 -- at 1.5 studs) so the lag lands ON the body, not behind it
                                 local aimPoint = part.Position
-                                local lead = part.AssemblyLinearVelocity * 0.06
-                                if lead.Magnitude > 1.5 then lead = lead.Unit * 1.5 end
+                                -- LEAD = "Prediction gracza" (suwak, ms): celujemy
+                                -- tam, gdzie gracz BEDZIE, nie gdzie jest teraz.
+                                -- Cap rosnie z predykcja (60 ms -> ~1.8 stara, jak
+                                -- stare 1.5) zeby mocne wyprzedzenie nie rzucalo
+                                -- celownika za bardzo w bok.
+                                local pred = aimUi.pred or 60
+                                local lead = part.AssemblyLinearVelocity * (pred / 1000)
+                                local cap = math.clamp(pred * 0.03, 0, 15)
+                                if lead.Magnitude > cap then lead = lead.Unit * cap end
                                 aimPoint = aimPoint + lead
                                 local toTarget = aimPoint - camPos
                                 local dist = toTarget.Magnitude
@@ -7173,7 +7922,7 @@ function startBloxStrikeScript()
     -- slider), 300 = at least 300 ms between shots.
     local triggerDelayMs = 60
     local lastTriggerShot = 0
-    local infiniteJump = false
+    local _infiniteJump = false
     local bunnyHop = false
     local bhopUnlocker = false
     local speedHack = false
@@ -7257,6 +8006,7 @@ function startBloxStrikeScript()
         function(p) -- "Team" attribute of any type (string/number)
             local ok, v = pcall(function() return p:GetAttribute("Team") end)
             if ok and v ~= nil and tostring(v) ~= "" then return "attr:Team=" .. tostring(v) end
+            return
         end,
         function(p) -- other variants of attribute names on the player
             -- After a game update the team key list can change, so 
@@ -7270,6 +8020,7 @@ function startBloxStrikeScript()
                 local ok, v = pcall(function() return p:GetAttribute(key) end)
                 if ok and v ~= nil and tostring(v) ~= "" then return "attr:" .. key .. "=" .. tostring(v) end
             end
+            return
         end,
         function(p) -- attributes on the CHARACTER (the game may move teams on spawn)
             local ch = p.Character
@@ -7279,10 +8030,12 @@ function startBloxStrikeScript()
                     if ok and v ~= nil and tostring(v) ~= "" then return "cattr:" .. key .. "=" .. tostring(v) end
                 end
             end
+            return
         end,
         function(p) -- classic Roblox Team / TeamColor
             if p.Team then return "team:" .. p.Team.Name end
             if p.TeamColor then return "clr:" .. p.TeamColor.Name end
+            return
         end,
         function(p) -- team folders (old structure, usually empty)
             if Characters then
@@ -7291,6 +8044,7 @@ function startBloxStrikeScript()
                 if t and isInTeamFolder(p, t) then return "Terrorists" end
                 if ct and isInTeamFolder(p, ct) then return "Counter-Terrorists" end
             end
+            return
         end,
         function(p) -- leaderstats (classic games keep the team in values)
             local ok, ls = pcall(function() return p:FindFirstChild("leaderstats") end)
@@ -7302,6 +8056,7 @@ function startBloxStrikeScript()
                     end
                 end
             end
+            return
         end,
         -- SAFETY NET AFTER A PATCH: the game changes the team key NAME, but
         -- the values still look CS-like (T/CT/Terrorists/Red/Blue).
@@ -7336,6 +8091,7 @@ function startBloxStrikeScript()
                     end
                 end
             end
+            return
         end,
     }
 
@@ -8169,7 +8925,7 @@ function startBloxStrikeScript()
     end)
 
     -- Sliders
-    local dragging1, dragging2, dragging3, dragging4 = false, false, false, false
+    local dragging1, dragging2, _dragging3, dragging4 = false, false, false, false
     local draggingTrig = false
 
     sb1.MouseButton1Down:Connect(function() dragging1 = true end)
@@ -8180,7 +8936,7 @@ function startBloxStrikeScript()
     uis.InputEnded:Connect(function(i)
         if not isCurrentGen() then return end
         if i.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging1, dragging2, dragging3, dragging4 = false, false, false, false
+            dragging1, dragging2, _dragging3, dragging4 = false, false, false, false
             draggingTrig = false
         end
     end)
@@ -8608,7 +9364,7 @@ function startBloxStrikeScript()
     local insertT = table.insert
     local sortT = table.sort
     local v3zero = Vector3.zero
-    local v3new = Vector3.new
+    local _v3new = Vector3.new
     local Players_svc = game:GetService("Players")
     local BulletClass, RaycastLib, GetRayIgnore
     pcall(function()
@@ -8658,12 +9414,12 @@ function startBloxStrikeScript()
     -- multiplier of 0.75) -> back. Window ~0.1 s -> invisibility to others is NOT
     -- guaranteed (replication ~20-60 Hz), the server may also kick you
     -- for the position jump -> test it.
-    local bTP = createButton("TP Shot: OFF", 12, "RageBot")
-    bTP.MouseButton1Click:Connect(function()
+    local bTPbs = createButton("TP Shot: OFF", 12, "RageBot")
+    bTPbs.MouseButton1Click:Connect(function()
         local on = not G.__liptonTPShot
         G.__liptonTPShot = on
-        bTP.Text = on and "TP Shot: ON" or "TP Shot: OFF"
-        bTP.BackgroundColor3 = on and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
+        bTPbs.Text = on and "TP Shot: ON" or "TP Shot: OFF"
+        bTPbs.BackgroundColor3 = on and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
         updateActiveCheatsList()
     end)
 
@@ -8686,7 +9442,7 @@ function startBloxStrikeScript()
                 local items = slotT and slotT._items
                 local idx = 1
                 if items then
-                    for k in pairs(items) do idx = k break end
+                    for k in pairs(items) do idx = k; break end
                 end
                 Inv.equip("Melee", idx)
             end)
@@ -9016,16 +9772,16 @@ function startBloxStrikeScript()
     local tpBindErr = ""
     local vmCache = {}
     local bodyCache = {}
-    local bTP = createButton("Third Person: OFF", 17, "Visuals")
+    local bTPriv = createButton("Third Person: OFF", 17, "Visuals")
     local slTP = createSliderLabel("TP Distance: 10", 18, "Visuals")
     local sbTP, sfTP = createSliderBar(19, "Visuals")
     sfTP.Size = UDim2.new(0.2, 0, 1, 0)
 
-    bTP.MouseButton1Click:Connect(function()
+    bTPriv.MouseButton1Click:Connect(function()
         local on = not thirdPerson
         thirdPerson = on
-        bTP.Text = on and "Third Person: ON v7" or "Third Person: OFF"
-        bTP.BackgroundColor3 = on and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
+        bTPriv.Text = on and "Third Person: ON v7" or "Third Person: OFF"
+        bTPriv.BackgroundColor3 = on and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
         pcall(function()
             local cam = workspace.CurrentCamera
             if on then
@@ -9158,14 +9914,14 @@ function startBloxStrikeScript()
             return "OK", vis, total
         end)
         if not ok then
-            bTP.Text = "TP ERR:" .. tostring(code):sub(1, 25)
+            bTPriv.Text = "TP ERR:" .. tostring(code):sub(1, 25)
             return
         end
         if code == "OK" then
             _G.__liptonTPFrames = (_G.__liptonTPFrames or 0) + 1
-            bTP.Text = "TP v7 BODY " .. tostring(visN) .. "/" .. tostring(totN) .. " #" .. _G.__liptonTPFrames
+            bTPriv.Text = "TP v7 BODY " .. tostring(visN) .. "/" .. tostring(totN) .. " #" .. _G.__liptonTPFrames
         else
-            bTP.Text = "TP v7 " .. tostring(code)
+            bTPriv.Text = "TP v7 " .. tostring(code)
         end
     end
 
@@ -9265,11 +10021,11 @@ function startBloxStrikeScript()
     local v2new = Vector2.new
     local function tpShotBlink(part, w)
         tpStat.blink = tpStat.blink + 1
-        if tpBusy then tpStat.err = "busy" return false end
+        if tpBusy then tpStat.err = "busy"; return false end
         local ch = plr.Character
-        if not ch or ch:GetAttribute("Dead") then tpStat.err = "dead" return false end
+        if not ch or ch:GetAttribute("Dead") then tpStat.err = "dead"; return false end
         local hrp = ch:FindFirstChild("HumanoidRootPart")
-        if not hrp then tpStat.err = "nohrp" return false end
+        if not hrp then tpStat.err = "nohrp"; return false end
         local saved = hrp.CFrame
         local tpos = part.Position
         -- Anchor = the victim's torso (we stand on the floor next to her, not at
@@ -9367,14 +10123,14 @@ function startBloxStrikeScript()
             tpStat.khp = tostring_(kLastHp) .. ">" .. tostring_(hum0 and hum0.Health or -1)
             kLastV, kLastHp = nil, nil
         end
-        if tpBusy then tpStat.err = "busy" return false end
+        if tpBusy then tpStat.err = "busy"; return false end
         local ch = plr.Character
-        if not ch or ch:GetAttribute("Dead") then tpStat.err = "dead" return false end
+        if not ch or ch:GetAttribute("Dead") then tpStat.err = "dead"; return false end
         local hrp = ch:FindFirstChild("HumanoidRootPart")
-        if not hrp then tpStat.err = "nohrp" return false end
+        if not hrp then tpStat.err = "nohrp"; return false end
         local vch = part:FindFirstAncestorWhichIsA("Model")
         local vroot = vch and vch:FindFirstChild("HumanoidRootPart")
-        if not vroot then tpStat.err = "novictimroot" return false end
+        if not vroot then tpStat.err = "novictimroot"; return false end
         local saved = hrp.CFrame
         local aim = vroot.Position
         local behind = aim - vroot.CFrame.LookVector * 2.5
@@ -9829,7 +10585,7 @@ function startBloxStrikeScript()
                 local ok2, gv = pcall(function()
                     return ch.GlobalVelocity
                 end)
-                if ok2 and typeof(gv) == "Vector3" then
+                if ok2 and tostring(typeof(gv)) == "Vector3" then
                     local h = math.sqrt(gv.X * gv.X + gv.Z * gv.Z)
                     if h > 1 then
                         local target = math.max(h, speedHackValue)
@@ -10375,7 +11131,7 @@ function startFischScript()
             if tick() < appraiseNextOpen then return end
             local prompt
             for _, d in ipairs(npc:GetDescendants()) do
-                if d:IsA("ProximityPrompt") then prompt = d break end
+                if d:IsA("ProximityPrompt") then prompt = d; break end
             end
             if prompt then
                 prompt:InputHoldBegin()
@@ -10591,13 +11347,13 @@ function startFischScript()
     -- FISHING
     makeToggle("Auto Cast", 1, "Fishing",
         function() return autoCast end,
-        function(v) autoCast = v pushFishingState() end)
+        function(v) autoCast = v; pushFishingState() end)
     makeToggle("Auto Shake", 2, "Fishing",
         function() return autoShake end,
-        function(v) autoShake = v pushFishingState() end)
+        function(v) autoShake = v; pushFishingState() end)
     makeToggle("Auto Reel", 3, "Fishing",
         function() return autoReel end,
-        function(v) autoReel = v pushFishingState() end)
+        function(v) autoReel = v; pushFishingState() end)
     createNote("On: cast, shake and reel work automatically (tested live).", 4, "Fishing")
     makeToggle("Auto Appraise", 5, "Fishing",
         function() return autoAppraise end,
@@ -11782,7 +12538,7 @@ function startFischScript()
         end)
     makeToggle("Speed Hack", 3, "Utility",
         function() return uSpeed end,
-        function(v) uSpeed = v setSpeed(v) pushUtilityState() end)
+        function(v) uSpeed = v; setSpeed(v); pushUtilityState() end)
     makeToggle("Fullbright", 4, "Utility",
         function() return uFullbright end,
         function(v)
@@ -11919,12 +12675,13 @@ function startRivalsScript()
     -- across ALL players and accept ONLY sources that actually
     -- DIFFER between players. No such source = everyone is an enemy (red).
     local teamSources = {
-        function(p) if p.Team then return "team:" .. p.Team.Name end end,
+        function(p) if p.Team then return "team:" .. p.Team.Name end; return end,
         function(p)
             for _, key in ipairs({"Team", "TeamName", "team", "TeamId", "TeamNumber", "Side", "Ally", "Faction"}) do
                 local ok, v = pcall(function() return p:GetAttribute(key) end)
                 if ok and v ~= nil and tostring(v) ~= "" then return "attr:" .. key .. "=" .. tostring(v) end
             end
+            return
         end,
         function(p)
             local ch = p.Character
@@ -11934,6 +12691,7 @@ function startRivalsScript()
                     if ok and v ~= nil and tostring(v) ~= "" then return "cattr:" .. key .. "=" .. tostring(v) end
                 end
             end
+            return
         end,
         function(p)
             local ls = p:FindFirstChild("leaderstats")
@@ -11946,8 +12704,9 @@ function startRivalsScript()
                     end
                 end
             end
+            return
         end,
-        function(p) if p.TeamColor then return "clr:" .. p.TeamColor.Name end end,
+        function(p) if p.TeamColor then return "clr:" .. p.TeamColor.Name end; return end,
     }
 
     -- src = chosen source, nil = not determined yet, false = no usable one
@@ -12477,7 +13236,7 @@ function startRivalsScript()
     local noSpreadRestoreVal = {}  -- [ValueBase] = oldValue
     local noSpreadPrinted = 0
     local noSpreadConn = nil
-    local noSpreadGuModule = nil    -- needed to restore GetSpread
+    local _noSpreadGuModule = nil    -- needed to restore GetSpread
     local noSpreadSpreadOrig = nil  -- original GetSpread (to turn it off)
     local noSpreadGuPatched = {}    -- [table]=true  all copies with GetSpread
 
@@ -12669,7 +13428,7 @@ function startRivalsScript()
         end
         local origFn = gu.GetSpread
         local newFn = function() return CFrame.identity end
-        noSpreadGuModule = gu
+        _noSpreadGuModule = gu
         noSpreadSpreadOrig = origFn
         noSpreadGuPatched = {}
         -- require returns a wrapper (metatable), and the game may keep its own copies
@@ -12707,7 +13466,7 @@ function startRivalsScript()
             end
         end
         noSpreadGuPatched = {}
-        noSpreadGuModule, noSpreadSpreadOrig = nil, nil
+        _noSpreadGuModule, noSpreadSpreadOrig = nil, nil
     end
 
     -- Every frame: the game can recompute spread on every shot 
@@ -13162,15 +13921,158 @@ local function onCorrectKey()
     showGameSelect()
 end
 
--- DEV SKIP: the owner's machine never sees the key window. We fetch our own
--- public IP (ipify) + HWID and compare against the two placeholders below -
--- for everyone else nothing changes: they get the normal key gate (and if the
--- HTTP check hangs, the fallback enables the window after 2 s, so nobody is
--- left without a gate). pcall around both calls: executors without them just
--- fall through to the normal key flow.
--- HOW TO WHITELIST YOURSELF: first run prints your IP and HWID to the console -
--- paste either value below in place of the placeholder. IP changes with the
--- ISP, HWID does not - fill HWID too.
+------------------------------------------------------------
+-- FRIEND KEYSYSTEM (ukryty, dla kolegow): klik w worek w grze
+-- (dolny prawy rog) = zlote mini-GUI "Friend Keysystem", klucz = "czosnek".
+-- Wpisanie klucza = game selector BEZ kupowania UGC. Dla reszty ludzi
+-- zostaje komunikat "kup moje UGC" + link (ekran wyzej).
+------------------------------------------------------------
+local friendGui = Instance.new("ScreenGui")
+friendGui.Name = "FriendKeySystem"
+friendGui.ResetOnSpawn = false
+friendGui.Parent = targetParent
+
+local hot = Instance.new("TextButton")
+hot.Name = "WorekHotspot"
+hot.BackgroundTransparency = 1
+hot.Text = ""
+hot.AutoButtonColor = false
+hot.Active = true
+hot.Size = UDim2.new(0, 110, 0, 110)
+hot.Position = UDim2.new(1, -130, 1, -180)   -- zapasowo: worek (dolny prawy)
+hot.ZIndex = 9999   -- klikalny NAD kazdym GUI gry
+hot.Parent = friendGui
+
+local friendFrame = Instance.new("Frame")
+friendFrame.Size = UDim2.new(0, 230, 0, 145)
+friendFrame.Position = UDim2.new(0.5, -115, 0.5, -72)
+friendFrame.BackgroundColor3 = Color3.fromRGB(28, 20, 6)
+friendFrame.BackgroundTransparency = 0.1
+friendFrame.BorderSizePixel = 2
+friendFrame.BorderColor3 = Color3.fromRGB(255, 200, 40)   -- ZLOTO
+friendFrame.Visible = false
+friendFrame.Active = true
+friendFrame.Draggable = true
+friendFrame.Parent = friendGui
+
+local friendTitle = Instance.new("TextLabel")
+friendTitle.Size = UDim2.new(1, 0, 0, 32)
+friendTitle.BackgroundColor3 = Color3.fromRGB(255, 200, 40)
+friendTitle.BorderSizePixel = 0
+friendTitle.Text = " Friend Keysystem "
+friendTitle.TextColor3 = Color3.fromRGB(40, 25, 0)
+friendTitle.TextSize = 15
+friendTitle.Font = Enum.Font.SourceSansBold
+friendTitle.Parent = friendFrame
+
+local friendBox = Instance.new("TextBox")
+friendBox.Size = UDim2.new(0.85, 0, 0, 32)
+friendBox.Position = UDim2.new(0.075, 0, 0, 44)
+friendBox.BackgroundColor3 = Color3.fromRGB(20, 14, 4)
+friendBox.BorderColor3 = Color3.fromRGB(255, 200, 40)
+friendBox.BorderSizePixel = 1
+friendBox.PlaceholderText = "Enter key..."
+friendBox.Text = ""
+friendBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+friendBox.TextSize = 14
+friendBox.Font = Enum.Font.SourceSansBold
+friendBox.Parent = friendFrame
+
+local friendBtn = Instance.new("TextButton")
+friendBtn.Size = UDim2.new(0.85, 0, 0, 28)
+friendBtn.Position = UDim2.new(0.075, 0, 0, 84)
+friendBtn.BackgroundColor3 = Color3.fromRGB(255, 200, 40)
+friendBtn.BorderSizePixel = 0
+friendBtn.Text = "OK"
+friendBtn.TextColor3 = Color3.fromRGB(40, 25, 0)
+friendBtn.TextSize = 14
+friendBtn.Font = Enum.Font.SourceSansBold
+friendBtn.Parent = friendFrame
+
+local friendMsg = Instance.new("TextLabel")
+friendMsg.Size = UDim2.new(1, 0, 0, 18)
+friendMsg.Position = UDim2.new(0, 0, 0, 118)
+friendMsg.BackgroundTransparency = 1
+friendMsg.Text = ""
+friendMsg.TextColor3 = Color3.fromRGB(255, 70, 70)
+friendMsg.TextSize = 12
+friendMsg.Font = Enum.Font.SourceSansBold
+friendMsg.Parent = friendFrame
+
+local function friendZamknij()
+    if friendGui and friendGui.Parent then friendGui:Destroy() end
+end
+
+hot.MouseButton1Click:Connect(function()
+    friendFrame.Visible = not friendFrame.Visible
+    if friendFrame.Visible then
+        -- okno pojawia sie PRZY WORKU (dokladnie tam gdzie klik), nie na
+        -- srodku ekranu: lewy gorny rog okna = nad-lewo od hotspota
+        local hx, hy = hot.Position.X.Offset, hot.Position.Y.Offset
+        friendFrame.Position = UDim2.new(0, math.max(5, hx - 240), 0, math.max(5, hy - 155))
+    end
+end)
+
+local function friendSprawdz()
+    if friendBox.Text == "czosnek" then
+        friendZamknij()
+        onCorrectKey()
+    else
+        friendMsg.Text = "Wrong key!"
+        task.delay(2, function()
+            if friendMsg and friendMsg.Parent then friendMsg.Text = "" end
+        end)
+    end
+end
+friendBtn.MouseButton1Click:Connect(friendSprawdz)
+friendBox.FocusLost:Connect(function(ep)
+    if ep then friendSprawdz() end
+end)
+
+-- SZUKANIE WORKA: hotspotu NIE przyczepiamy do GUI gry (moga byc ukryte
+-- albo niszczone przy ladowaniu - hotspot ginial razem z nimi i klik w rog
+-- nic nie robil). Hotspot ZAWSZE zostaje w naszym GUI = zawsze klikalny,
+-- a finder tylko ustawia jego POZYCJE nad workiem. Nie znajdziemy worka =
+-- pozycja zapasowa (dolny prawy rog).
+task.spawn(function()
+    while hot and hot.Parent do
+        task.wait(2)
+        local vs = workspace.CurrentCamera.ViewportSize
+        for _, d in ipairs(plr.PlayerGui:GetDescendants()) do
+            if d:IsA("GuiObject") and d.Visible then
+                local n = d.Name:lower()
+                if n:find("bag", 1, true) or n:find("cash", 1, true)
+                    or n:find("money", 1, true) or n:find("worek", 1, true) then
+                    local c = d.AbsolutePosition + d.AbsoluteSize / 2
+                    if c.X > vs.X * 0.55 and c.Y > vs.Y * 0.55
+                        and d.AbsoluteSize.X > 20 then
+                        hot.Position = UDim2.new(0, math.floor(c.X - 55), 0, math.floor(c.Y - 55))
+                        break
+                    end
+                end
+            end
+        end
+    end
+end)
+
+------------------------------------------------------------
+-- WLASNOSC UGC: jak UGC_ID > 0 i gracz je kupil - wchodzi bez niczego.
+-- Na razie UGC nie istnieje (UGC_ID = 0), wiec sprawdzanie wylaczone.
+------------------------------------------------------------
+task.spawn(function()
+    if UGC_ID == 0 then return end
+    local ok, ma = pcall(function()
+        return game:GetService("MarketplaceService"):UserOwnsAssetAsync(plr.UserId, UGC_ID)
+    end)
+    if ok and ma then
+        friendZamknij()
+        onCorrectKey()
+    end
+end)
+
+-- DEV SKIP: wlasciciela (IP/HWID) wpuszczamy od razu - reszta widzi ekran
+-- "kup moje UGC" (albo wchodzi Friend Keysystemem). Najpierw w konsoli
+-- wypisuje sie Twoje IP i HWID - wklej je nizej w miejsce placeholderow.
 task.spawn(function()
     local unlocked = false
     task.delay(2, function()
@@ -13185,40 +14087,18 @@ task.spawn(function()
     print("[LiptonHub] IP: " .. (ip ~= "" and ip or "?") .. " | HWID: " .. (hw ~= "" and hw or "?"))
     if ip == "TUTAJ-TWOJE-IP" or hw == "TUTAJ-TWOJE-HWID" then
         unlocked = true
-        onCorrectKey()   -- menu straight away: the key window is never shown
+        friendZamknij()
+        onCorrectKey()
     elseif keyGui and keyGui.Parent then
         keyGui.Enabled = true
     end
 end)
 
-keyBtn.MouseButton1Click:Connect(function()
-    if keyBox.Text == "lipton" then
-        onCorrectKey()
-    else
-        wrongLabel.Text = "Wrong key! Try again."
-        task.wait(2)
-        wrongLabel.Text = ""
-    end
-end)
-
-keyBox.FocusLost:Connect(function(enterPressed)
-    if enterPressed then
-        if keyBox.Text == "lipton" then
-            onCorrectKey()
-        else
-            wrongLabel.Text = "Wrong key! Try again."
-            task.wait(2)
-            wrongLabel.Text = ""
-        end
-    end
-end)
-
 ------------------------------------------------------------
--- OWNER BYPASS: the owner and M4r_c3l1 enter the game selection
--- menu right away (keyGui is destroyed in showGameSelect, so
--- the key window never gets a chance to show up)
+-- OWNER BYPASS (WYLACZONY - zeby zobaczyc jak wyglada ekran UGC
+-- jak widzi go zwykly uzytkownik). Jak chcesz wrocic - odkomentuj.
 ------------------------------------------------------------
-if plr.Name == "67Tri_pleT67" or plr.DisplayName == "67Tri_pleT67"
-    or plr.Name == "M4r_c3l1" or plr.DisplayName == "M4r_c3l1" then
-    onCorrectKey()
-end
+-- if plr.Name == "67Tri_pleT67" or plr.DisplayName == "67Tri_pleT67" then
+--     friendZamknij()
+--     onCorrectKey()
+-- end
