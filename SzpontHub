@@ -10,7 +10,7 @@
 --    Rivals      Rivals hack menu (options added later)
 print("chuj ci w dupe :D")
 -- version marker: right after inject you can see in the console WHICH file started
-print("[SzpontHub] build r5 28.10.2026 - CandySpoof+CoinESP+AimFix")
+print("[SzpontHub] build r13 28.10.2026 - CandySpoof+CoinESP+AimFix")
 -- Players via GetService: game.Players with a dot does not work in this DataModel
 local playersService = game:GetService("Players")
 local plr = playersService.LocalPlayer
@@ -57,6 +57,20 @@ local function restoreWorldState()
             end
             for _, p in ipairs(ch:GetChildren()) do
                 if p:IsA("BasePart") then p.CanCollide = true end -- end of noclip
+            end
+            -- normalny stan humanoida (lot wylaczal Freefall = animacja biegu)
+            pcall(function()
+                local hum0 = ch:FindFirstChildOfClass("Humanoid")
+                if hum0 then hum0:SetStateEnabled(Enum.HumanoidStateType.Freefall, true) end
+            end)
+            -- predkosc z bypassu lotu tez musi zniknac = bez tego postac leciala
+            -- dalej ostatnim wektorem poza mape
+            do
+                local hrp0 = ch:FindFirstChild("HumanoidRootPart")
+                if hrp0 then
+                    hrp0.AssemblyLinearVelocity = Vector3.zero
+                    hrp0.AssemblyAngularVelocity = Vector3.zero
+                end
             end
         end
         -- full brightness (fullbright) returns to what it was before the script
@@ -809,7 +823,7 @@ wmLabel.Font = Enum.Font.SourceSansBold
 wmLabel.TextSize = 14
 wmLabel.TextColor3 = Color3.fromRGB(210, 150, 255)
 wmLabel.TextXAlignment = Enum.TextXAlignment.Left
-wmLabel.Text = " LiptonHub r5 "
+wmLabel.Text = " LiptonHub r13 "
 wmLabel.Parent = wmFrame
 
 -- FPS: we count RenderStepped frames; ping: Stats.Network "Data Ping" (ms).
@@ -832,7 +846,7 @@ runService.RenderStepped:Connect(function()
         wmFps = math.floor(wmFrames / (now - wmLast) + 0.5)
         wmFrames = 0
         wmLast = now
-        wmLabel.Text = " LiptonHub r5  |  FPS: " .. wmFps .. "  |  Ping: " .. wmPingMs() .. " ms"
+        wmLabel.Text = " LiptonHub r13  |  FPS: " .. wmFps .. "  |  Ping: " .. wmPingMs() .. " ms"
     end
 end)
 
@@ -1391,7 +1405,47 @@ function startMainScript()
             end
         end)
     end)
-    print("[SzpontHub] r5 UI: CandySpoof podlaczony")
+    print("[SzpontHub] r13 UI: CandySpoof podlaczony")
+
+    ------------------------------------------------------------
+    -- FILTR ZDROWEGO CUKIERKA: szablony/skladowiska mapy moga miec
+    -- "cuckierki" w powietrzu albo poza mapa - farma leciala do nich
+    -- i "wywalalo ja w chmury". Cukierek musi byc w rozsadnej wysokosci
+    -- wzgledem postaci (mapa nie ma 120 studow rozpietosci).
+    -- Definiowane WCZESNIE, ale wywolywane pozniej = brak problemu z zasiegiem.
+    ------------------------------------------------------------
+    tp.coinOk = function(c, pos)
+        if not (c and c.Parent and pos) then return false end
+        local p = c.Position
+        if math.abs(p.Y - pos.Y) > 120 then return false end
+        return true
+    end
+
+    ------------------------------------------------------------
+    -- STRAZNIK PREDKOSCI (anty "wywala za mape"): lot farmy ustawia duza
+    -- predkosc; jak lot sie skonczy w dziwnym momencie (zmiana rundy,
+    -- teleport gry, teleport z zakładki), predkosc ZOSTAWALA i postac
+    -- leciala dalej ostatnim wektorem = poza mape. Zerujemy ja gdy:
+    --   * lot nie lecial w ostatnich 0.4 s (tp.flyAt),
+    --   * nikt nie idzie (brak wejscia ruchu = to nie bieganie),
+    --   * predkosc POZIOMA > 110 (sam spadek w dol = pion, nietkniete).
+    ------------------------------------------------------------
+    runService.Heartbeat:Connect(function()
+        if not isCurrentGen() then return end
+        if os.clock() - (tp.flyAt or 0) < 0.4 then return end
+        local ch = plr.Character
+        local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+        local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+        if not (hrp and hum) then return end
+        if hum.MoveDirection.Magnitude > 0.05 then return end
+        local v = hrp.AssemblyLinearVelocity
+        if Vector3.new(v.X, 0, v.Z).Magnitude > 110 then
+            hrp.AssemblyLinearVelocity = Vector3.new(0, v.Y, 0)
+            hrp.Velocity = Vector3.new(0, v.Y, 0)
+        end
+    end)
+    -- (RATUNEK Z POZA MAPY jest nizej - kolo farmy, bo potrzebuje coinCache
+    -- i isInLobby ktore powstaja dopiero tam)
 
     local sl1 = Instance.new("TextLabel")
     sl1.Size = UDim2.new(0.95, 0, 0, 12)
@@ -3070,11 +3124,6 @@ function startMainScript()
                 mm2Ppm = false
                 if tp then tp.on = false end
                 camUi.on = false   -- petla kamery samoodwiaze sie przy nastepnej klatce
-                camUi.zoomOn = false
-                if camUi.zoomSaved then
-                    pcall(function() plr.CameraMaxZoomDistance = camUi.zoomSaved end)
-                    camUi.zoomSaved = nil
-                end
                 -- 2) world state (WalkSpeed, collisions, rotation, lighting, ESP)
                 restoreWorldState()
                 -- 3) old GUI disappears
@@ -3109,7 +3158,6 @@ function startMainScript()
         if roleFlags.void then table.insert(activeList, "Anti-Void") end
         if tp.on then table.insert(activeList, " TP Farm (" .. string.format("%.1f", tp.sec) .. "s)") end
         if tp.candy.on then table.insert(activeList, " Candy Vacuum") end
-        if camUi.zoomOn then table.insert(activeList, " Infinite Zoom") end
         if tp.coinEsp then table.insert(activeList, " Coin ESP (zloto)") end
         if antiFling then table.insert(activeList, " Anti-Fling") end
         if antiAfk then table.insert(activeList, " Anti-AFK") end
@@ -4283,47 +4331,12 @@ function startMainScript()
     -- przyczyna - usunieta. Zostaje auto-follow (nizej) ktory lapie kamere
     -- TYLKO gdy faktycznie sie zepsuje (postac poza ekranem / lot farmy).
 
-    -- INFINITE ZOOM: zdjecie limitu oddalania (CameraMaxZoomDistance) - scroll
-    -- oddala tak daleko, jak sie chce. Dziala na ZWYKLEJ kamerze; gry czesto
-    -- przywracaja limit (respawn/skrypty), wiec pilnujemy go co sekunde.
-    local bInfZoom = createButton("Infinite Zoom: OFF", 29, "Visuals")
-
-    bInfZoom.MouseButton1Click:Connect(function()
-        camUi.zoomOn = not camUi.zoomOn
-        bInfZoom.Text = camUi.zoomOn and "Infinite Zoom: ON" or "Infinite Zoom: OFF"
-        bInfZoom.BackgroundColor3 = camUi.zoomOn and themes[currentTheme].Primary or themes[currentTheme].ButtonBg
-        updateActiveCheatsList()
-        pcall(function()
-            if camUi.zoomOn then
-                -- zapamietujemy ORYGINALNY limit, ale NIGDY 100000: po starym
-                -- odpaleniu (albo wywaleniu skryptu bez przywracania) limit mogl
-                -- zostac na 100000 i zapis takiej wartosci = "infinite zoom dziala
-                -- nawet po wylaczeniu opcji"
-                local cur = plr.CameraMaxZoomDistance
-                camUi.zoomSaved = (cur < 100000) and cur or nil
-                plr.CameraMaxZoomDistance = 100000
-            else
-                plr.CameraMaxZoomDistance = camUi.zoomSaved or 128
-                camUi.zoomSaved = nil
-            end
-        end)
-    end)
-
-    task.spawn(function()
-        while true do
-            if not isCurrentGen() then return end
-            task.wait(1)
-            pcall(function()
-                if camUi.zoomOn then
-                    if plr.CameraMaxZoomDistance < 100000 then plr.CameraMaxZoomDistance = 100000 end
-                elseif plr.CameraMaxZoomDistance >= 100000 then
-                    -- SAMONAPRAWA: >= 100000 to NASZA wartosc zostawiona przez
-                    -- kiedys (stare odpalenie/unload) - przy WYLACZONEJ opcji
-                    -- przywracamy normalny limit
-                    plr.CameraMaxZoomDistance = camUi.zoomSaved or 128
-                end
-            end)
-        end
+    -- [USUNIETE] INFINITE ZOOM: dzialal nawet po wylaczeniu (limit zoomu
+    -- zostawal zdjety po starych odpaleniach) - cala opcja wywalona.
+    -- Przywracamy limit BEZWARUNKOWO (wczesniejszy warunek >= 100000 lapal
+    -- za malo przypadkow i "zoom w nieskonczonosc" zostawal).
+    pcall(function()
+        plr.CameraMaxZoomDistance = 128
     end)
 
     -- SCROLL: kolko zmienia dystans przypiecia kamery (6-2000 studow).
@@ -5301,8 +5314,13 @@ function startMainScript()
         -- but the character lies down and cannot move.
         hum.PlatformStand = false
         hum.AutoRotate = true
+        -- WSZYSTKIE cztery predkosci: same Velocity/RotVelocity NIE
+        -- wystarczaly - lot farmy ustawia Assembly* i po teleportacji postac
+        -- dalej leciala ostatnim wektorem = "teleport do mapy i dalej wywala"
         hrp.Velocity = Vector3.new(0, 0, 0)
         hrp.RotVelocity = Vector3.new(0, 0, 0)
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.AssemblyAngularVelocity = Vector3.zero
         hrp.CFrame = CFrame.new(pos)
         tpSay(co)
     end
@@ -5585,6 +5603,18 @@ function startMainScript()
         elseif plr.Character then
             local hum = plr.Character:FindFirstChildOfClass("Humanoid")
             local hrpOff = plr.Character:FindFirstChild("HumanoidRootPart")
+            -- predkosc z bypassu MUSi zniknac przy wylaczeniu - inaczej postac
+            -- dalej leci ostatnim wektorem i "wywala ja za mape"
+            if hrpOff then
+                hrpOff.AssemblyLinearVelocity = Vector3.zero
+                hrpOff.AssemblyAngularVelocity = Vector3.zero
+            end
+            -- przywracamy normalny stan humanoida (lot wylaczal Freefall)
+            pcall(function()
+                if hum then
+                    hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, true)
+                end
+            end)
             -- restore the DEFAULT walk speed: the farm sets WalkSpeed to
             -- 100, so without this the character would keep sprinting after
             -- the farm is turned off (the farmSpeed slider).
@@ -5602,7 +5632,10 @@ function startMainScript()
             -- pierwsza powierzchnie nad glowa = "postac znika").
             if hrpOff and not isInLobby(hrpOff.Position, 25) then
                 local rayOff = workspace:Raycast(hrpOff.Position, Vector3.new(0, 200, 0), farmRayParams)
-                if farmBag.floorY then
+                -- SANITY floorY: stary floorY (z poprzedniej mapy/rundy) mogl
+                -- wystrzelic postac TYSIACE studow w niebo - dlatego teleport
+                -- na podloge tylko gdy roznica wysokosci jest sensowna (<150)
+                if farmBag.floorY and math.abs(hrpOff.Position.Y - farmBag.floorY) < 150 then
                     -- znamy wierzch podlogi z nurkowania - celniej niz promien
                     -- w gore (ten lapal pierwsza przeszkode nad glowa = postac
                     -- ladowala w scianie i "znikala")
@@ -5657,6 +5690,105 @@ function startMainScript()
         end
     end)
 
+    ------------------------------------------------------------
+    -- STRAZNIK TELEPORTU GRY + RATUNEK Z POZA MAPY (anty "wywala za mape
+    -- NA STARCIE RUNDY"). Start rundy = gra teleportuje postac lobby->mapa:
+    -- w tym momencie zostawiona predkosc, stary floorY i stary cache celow
+    -- RAZEM wyrzucaly postac poza mape. Wykrywamy SKOK POZYCJI (teleport
+    -- gry albo fling) i natychmiast: zerujemy predkosc, zapominamy stary
+    -- stan i dajemy 1.5 s karencji (zaden system nie rusza postaci).
+    -- Potem kontrola ciagla: dalej niz 400 studow od zywych cukierkow
+    -- i nie w lobby = jestesmy poza mapa -> powrot NA NAJBLIZSZY cukierek.
+    -- UWAGA: musi byc PO deklaracji coinCache/isInLobby/farmBag - wczesniej
+    -- widzi tylko globale = nil i straznik nie dzialal.
+    ------------------------------------------------------------
+    tp.teleAt = 0
+    tp.lastPos = nil
+    runService.Heartbeat:Connect(function()
+        if not isCurrentGen() then return end
+        local ch = plr.Character
+        local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+        if not hrp then
+            tp.lastPos = nil
+            return
+        end
+        local pos = hrp.Position
+        local teraz = os.clock()
+        if tp.lastPos then
+            local skokW = pos - tp.lastPos
+            local skok = skokW.Magnitude
+            if skok > 25 then
+                local vpop = hrp.AssemblyLinearVelocity
+                -- ROLLBACK SERWERA (za duza predkosc lotu): serwer cofa postac
+                -- WSTECZ w stosunku do kierunku lotu. UWAGA: to NIE jest
+                -- teleport gry - wolimy NIE mrozic postaci (mrozenie = blad r8
+                -- "w ogole nie farmi"), tylko AUTOMATYCZNIE ZWALNIAMY lot,
+                -- az serwer przestanie cofac. Predkosc wraca sama po 15 s
+                -- spokoju - czyli hub sam znajduje najwieksza predkosc, ktora
+                -- serwer toleruje.
+                local wstecz = vpop.Magnitude > 20
+                    and (skokW.X * vpop.X + skokW.Z * vpop.Z) < 0
+                if wstecz and skok < 250 then
+                    tp.slowMul = math.max(0.35, (tp.slowMul or 1) * 0.6)
+                    tp.rollbackAt = teraz
+                    hrp.AssemblyLinearVelocity = Vector3.zero
+                    hrp.Velocity = Vector3.zero
+                    tp.lastPos = pos
+                    return
+                end
+                -- TELEPORT GRY (start rundy / zmiana mapy / fling): duzy skok
+                -- w bok lub do przodu - wtedy pelna karencja + przypiecie
+                if skok > 100 and teraz - (tp.flyAt or 0) > 0.1 then
+                    tp.teleAt = teraz + 1.5
+                    tp.telePos = pos -- trzymamy postac w tym miejscu przez karencje
+                    hrp.AssemblyLinearVelocity = Vector3.zero
+                    hrp.AssemblyAngularVelocity = Vector3.zero
+                    hrp.Velocity = Vector3.zero
+                    hrp.RotVelocity = Vector3.zero
+                    farmBag.floorY = nil -- stara podloga wyrzucala w niebo
+                    coinCache = {}       -- stare cukierki = stare cele
+                    tp.flyAt = 0
+                    tp.lastPos = pos
+                    return
+                end
+            end
+            -- powrot do pelnej predkosci po 15 s bez rollbackow
+            if teraz - (tp.rollbackAt or 0) > 15 and (tp.slowMul or 1) < 1 then
+                tp.slowMul = math.min(1, (tp.slowMul or 1) + 0.02)
+            end
+        end
+        tp.lastPos = pos
+        -- karencja po teleportacji gry: TRZYMAMY postac w miejscu - zadna
+        -- sila (fizyka, fling, zostawiona predkosc) nie moze jej stad ruszyc
+        if teraz < (tp.teleAt or 0) then
+            if tp.telePos then
+                hrp.CFrame = CFrame.new(tp.telePos)
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                hrp.AssemblyAngularVelocity = Vector3.zero
+            end
+            return
+        end
+        if not autoFarmCoins and not tp.on then return end
+        if teraz - (tp.flyAt or 0) < 0.4 then return end -- lotem sami lecimy
+        if isInLobby(pos, 40) then return end
+        local cel, celD = nil, math.huge
+        for _, c in ipairs(coinCache) do
+            if isCoinAlive(c) and tp.coinOk(c, pos) then
+                local d = (c.Position - pos).Magnitude
+                if d < celD then celD, cel = d, c end
+            end
+        end
+        -- blisko cukierka (albo brak zywych = przerwa miedzy rundami) = OK
+        if not cel or celD <= 400 then return end
+        local dokad = cel.Position + Vector3.new(0, 6, 0)
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.AssemblyAngularVelocity = Vector3.zero
+        hrp.CFrame = CFrame.new(dokad)
+        tp.flyAt = teraz
+        tp.lastPos = dokad
+    end)
+    print("[SzpontHub] r13: straznik teleportu gry + ratunek z poza mapy OK")
+
     -- TP Farm loop: teleport to the nearest coin every tp.sec seconds.
     -- ALL the logic INSIDE the loop is deliberate - Lua has a limit of 200 registers
     -- per chunk, and a separate local for a helper breaks compilation of the file.
@@ -5666,7 +5798,9 @@ function startMainScript()
             if not isCurrentGen() then return end
             local ok, err = pcall(function()
                 task.wait(0.02)
-                if tp.on then
+                -- KARENCJA po teleportacji gry (start rundy): TP Farm tez nie
+                -- rusza postaci przez 1.5 s po teleportacji
+                if tp.on and os.clock() >= (tp.teleAt or 0) then
                     -- reset at the start of the tick: if the previous tick died
                     -- while walking, the flag would not block Auto Farm
                     tp.walking = false
@@ -5696,7 +5830,7 @@ function startMainScript()
                                 local c = coinCache[i]
                                 if not isCoinAlive(c) then
                                     table.remove(coinCache, i)
-                                elseif not coinBlacklist[c] then
+                                elseif not coinBlacklist[c] and tp.coinOk(c, hrp.Position) then
                                     local d = (hrp.Position - c.Position).Magnitude
                                     if d < bestDist then
                                         bestDist, nearest = d, c
@@ -5726,7 +5860,8 @@ function startMainScript()
                                 -- "chodzilby" pod podlaga i nie mogl przejsc "przez sufit"
                                 -- do cukierka na gorze. Wierzch podlogi znamy z nurkowania
                                 -- (farmBag.floorY) - stawiamy postac dokladnie NA NIEJ.
-                                if hum.PlatformStand and farmBag.floorY then
+                                if hum.PlatformStand and farmBag.floorY
+                                    and math.abs(hrp.Position.Y - farmBag.floorY) < 150 then
                                     hrp.CFrame = CFrame.new(hrp.Position.X, farmBag.floorY + 1, hrp.Position.Z)
                                     hrp.AssemblyLinearVelocity = Vector3.zero
                                     hrp.AssemblyAngularVelocity = Vector3.zero
@@ -6411,6 +6546,10 @@ function startMainScript()
     runService.RenderStepped:Connect(function(dt)
         if not isCurrentGen() then return end
         if not autoFarmCoins then return end
+        -- KARENCJA po teleportacji gry (start rundy): przez te 1.5 s NIC
+        -- nie rusza postaci - wczesniej farma brala sie do roboty od razu
+        -- po teleportacji i to ja wyrzucalo za mape
+        if os.clock() < (tp.teleAt or 0) then return end
         local ch = plr.Character
         local hrp = getHRP(ch)
         local hum = getHum(ch)
@@ -6521,7 +6660,7 @@ function startMainScript()
                 local d = (c.Position - hrp.Position).Magnitude
                 -- WHEN WALKING we do not cross the whole map: smaller range = more
                 -- often we turn back and fewer walls to go around (legit must arrive fast)
-                if d < bestDist and d <= (farmLegit and 100 or FARM_TARGET_RANGE) then
+                if d < bestDist and d <= (farmLegit and 100 or FARM_TARGET_RANGE) and tp.coinOk(c, hrp.Position) then
                     bestDist = d
                     target = c
                 end
@@ -6743,32 +6882,28 @@ function startMainScript()
                         hum.AutoRotate = false
                     end
                     local dir3 = dir.Unit
-                    -- BYPASS "Invalid position" (WBUDOWANY w farme, bez osobnej
-                    -- opcji): ruch PREDKOSCIA zamiast skokow CFrame - serwer widzi
-                    -- zwykly ruch gracza, nie teleport = nie wywala. Predkosc to
-                    -- suwak Farm Speed x4 (40-220 studow/s) = zapierdala z coiny
-                    -- na coine, a sciany i tak przepuszcza noclip.
-                    tp.flyAt = os.clock() -- dla anti-fLing: to NASZ ruch, nie fling
-                    local v = math.clamp(farmSpeed * 4, 40, 220)
-                    hrp.AssemblyLinearVelocity = dir3 * v
-                    hrp.Velocity = dir3 * v
-                    hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                    tp.flyAt = os.clock() -- dla anti-fLing: to NASZ ruch
+                    -- STARY SPRAWDZONY LOT (krokami CFrame, max 2 stady/klatke):
+                    -- ten chodzil BEZBLEDNIE (zero rollbackow, zero "wywala za
+                    -- mape") i wlasnie taki wraca na nocne farmienie.
+                    -- Predkosc suwakiem Farm Speed - powyzej ~30 studow/s serwer
+                    -- moze cofac ruch, wiec na cala noc trzymaj 24-30.
+                    local speed = math.clamp(farmSpeed, 16, FARM_FLY_MAX_SPEED)
+                    -- UCIECZKA PRZED MORDERCA WOLNIEJ: fleeDir to KIERUNEK (nie
+                    -- punkt), wiec bez limitu postac uciekala w nieskonczonosc
+                    -- i "wylatywala za mape"
+                    if fleeDir then speed = math.min(speed, 40) end
+                    local krok = math.min(dist, speed * dt, FARM_MAX_STEP)
+                    local nextPos = hrp.Position + dir3 * krok
+                    -- LEZENIE NA PLECACH (twarz do gory) - stary, sprawdzony
+                    -- wyglad lotu
+                    hrp.CFrame = CFrame.new(nextPos, nextPos + dir3) * CFrame.Angles(math.rad(-90), 0, 0)
+                    -- ZERUJ WSZYSTKIE cztery predkosci: same Velocity nie
+                    -- wystarczaly, fizyka liczyla Assembly* i krecila cialem
+                    hrp.Velocity = Vector3.new(0, 0, 0)
                     hrp.RotVelocity = Vector3.new(0, 0, 0)
-                    local rot = CFrame.Angles(math.rad(-90), 0, 0) -- LEZENIE NA PLECACH
-                    -- ASYSTA: gdyby fizyka niosla za slabo (gra trzyma predkosc),
-                    -- doklejamy maly krok CFrame (max 2 stady/klatke) - postac
-                    -- ZAWSZE leci do cukierka, nigdy nie stoi "i sie rotatuje"
-                    local przeszedl = tp.flyLast and (hrp.Position - tp.flyLast).Magnitude or v * dt
-                    if przeszedl < v * dt * 0.3 then
-                        local krok = math.min(dist, v * dt, FARM_MAX_STEP)
-                        hrp.CFrame = CFrame.new(hrp.Position + dir3 * krok,
-                            hrp.Position + Vector3.new(dir3.X, 0, dir3.Z)) * rot
-                    else
-                        -- sam obrot (bez translacji) = serwer tego nie waliduje
-                        hrp.CFrame = CFrame.new(hrp.Position,
-                            hrp.Position + Vector3.new(dir3.X, 0, dir3.Z)) * rot
-                    end
-                    tp.flyLast = hrp.Position
+                    hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                    hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
                 else
                     -- POKE OUT AT THE CANDY (within 1 stud of the under-point):
                     -- rise to 1 stud below it and stay LYING - the same pickup
@@ -6902,7 +7037,7 @@ function startMainScript()
             if autoKillMurder and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
                 local gun = plr.Character:FindFirstChildOfClass("Tool")
                 if not (gun and (gun.Name:lower():find("gun") or gun.Name:lower():find("revolver") or gun.Name:lower():find("pistol"))) then
-                    local bpGun = plr.Backpack:FindFirstChildOfClass("Tool")
+                    local bp = plr:FindFirstChild("Backpack"); local bpGun = bp and bp:FindFirstChildOfClass("Tool")
                     if bpGun and (bpGun.Name:lower():find("gun") or bpGun.Name:lower():find("revolver") or bpGun.Name:lower():find("pistol")) then
                         -- Humanoid via getHum: after respawn it may be gone
                         local hum = getHum(plr.Character)
@@ -7055,7 +7190,7 @@ function startMainScript()
                 if getRole(plr) == "Murderer" then
                     local knife = plr.Character:FindFirstChildOfClass("Tool")
                     if not (knife and (knife.Name:lower():find("knife") or knife.Name:lower():find("blade") or knife.Name:lower():find("n"))) then
-                        local bpKnife = plr.Backpack:FindFirstChildOfClass("Tool")
+                        local bp = plr:FindFirstChild("Backpack"); local bpKnife = bp and bp:FindFirstChildOfClass("Tool")
                         if bpKnife and (bpKnife.Name:lower():find("knife") or bpKnife.Name:lower():find("blade") or bpKnife.Name:lower():find("n")) then
                             -- Humanoid via getHum: after respawn it may be gone
                             local hum = getHum(plr.Character)
@@ -13391,7 +13526,7 @@ function startRivalsScript()
         if sps then pcall(function() scanModules(sps:GetDescendants()) end) end
 
         -- 2) Attributes/Value* in instances (configs, viewmodel, character)
-        local roots = {rs, game:GetService("StarterPack"), workspace.CurrentCamera, plr.Character, plr.Backpack}
+        local roots = {rs, game:GetService("StarterPack"), workspace.CurrentCamera, plr.Character, plr:FindFirstChild("Backpack")}
         local budget = 10000
         for _, root in ipairs(roots) do
             if root then
